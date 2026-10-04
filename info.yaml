@@ -1,0 +1,48 @@
+# Tiny Tapeout project information
+# Jane Street asked for 6x4. The stock CMOS5L template still lists a smaller
+# set of legal sizes; keep 6x4 until they publish an updated schema.
+project:
+  title:        "Protocol emulator"
+  author:       "POSA"
+  discord:      ""
+  description:  "Programmable pin engine that bit-bangs protocols from firmware"
+  language:     "Verilog"
+  clock_hz:     50000000
+
+  tiles: "6x4"
+
+  top_module:  "tt_um_posamokshith_proto"
+
+  source_files:
+    - "pin_engine.v"
+    - "project.v"
+
+pinout:
+  ui[0]: "WR"
+  ui[1]: "CMD0"
+  ui[2]: "CMD1"
+  ui[3]: "CMD2"
+  ui[4]: ""
+  ui[5]: ""
+  ui[6]: ""
+  ui[7]: ""
+
+  uo[0]: "TX"
+  uo[1]: "BUSY"
+  uo[2]: ""
+  uo[3]: ""
+  uo[4]: ""
+  uo[5]: ""
+  uo[6]: ""
+  uo[7]: ""
+
+  uio[0]: "D0"
+  uio[1]: "D1"
+  uio[2]: "D2"
+  uio[3]: "D3"
+  uio[4]: "D4"
+  uio[5]: "D5"
+  uio[6]: "D6"
+  uio[7]: "D7"
+
+yaml_version: 6
