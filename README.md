@@ -44,7 +44,7 @@ cd test && make -B
 
 `src/config.json` is the template OpenLane config (50 MHz). `.github/workflows/` is the template's test, GDS, docs, and FPGA actions. They run on push because this repository root is the Tiny Tapeout project.
 
-Host command map and the instruction encodings are in `docs/info.md`.
+The problem is `docs/info.md`. The instruction encodings and host command map for the current program are in `docs/pin_engine.md`.
 
 Next: sample an input pin and branch, so SPI and I2C can be programs on the same engine.
 

@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pin_engine and project.v</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f3;
+      --fg: #1c1917;
+      --muted: #57534e;
+      --card: #ffffff;
+      --line: #a8a29e;
+      --blue: #1d4ed8;
+      --orange: #c2410c;
+      --band: rgba(28, 25, 23, 0.07);
+      --trace-fill: rgba(194, 65, 12, 0.18);
+      --track: #e7e5e4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917;
+        --fg: #fafaf9;
+        --muted: #a8a29e;
+        --card: #292524;
+        --line: #78716c;
+        --blue: #93c5fd;
+        --orange: #fdba74;
+        --band: rgba(250, 250, 249, 0.08);
+        --trace-fill: rgba(253, 186, 116, 0.22);
+        --track: #44403c;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.45 ui-sans-serif, system-ui, sans-serif;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 560;
+      margin: 0 0 4px;
+    }
+    .lede {
+      margin: 0 0 28px;
+      color: var(--muted);
+    }
+    section { margin: 0 0 36px; }
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 560;
+      margin: 0;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.92rem;
+      margin: 2px 0 12px;
+    }
+    .head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px 16px;
+      align-items: baseline;
+    }
+    .legend {
+      display: flex;
+      gap: 14px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 6px;
+      vertical-align: -1px;
+    }
+    .swatch.host { background: var(--blue); }
+    .swatch.tx { background: var(--orange); }
+    svg.diagram {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+    }
+    svg.diagram text {
+      fill: var(--fg);
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    svg.diagram text.dim { fill: var(--muted); }
+    svg.diagram text.plain {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    .box {
+      fill: var(--card);
+      stroke: var(--fg);
+      stroke-width: 1.5px;
+    }
+    .hair {
+      stroke: var(--line);
+      stroke-width: 1px;
+      fill: none;
+    }
+    .wire {
+      stroke: var(--fg);
+      stroke-width: 1.5px;
+      fill: none;
+    }
+    .arrow-head { fill: var(--fg); }
+    .host-mark { fill: var(--blue); }
+    .tx-mark { fill: var(--orange); }
+    .trace-fill { fill: var(--trace-fill); }
+    .trace {
+      stroke: var(--orange);
+      stroke-width: 2px;
+      fill: none;
+      stroke-linejoin: miter;
+      stroke-linecap: square;
+    }
+    .band { fill: var(--band); }
+    .sel { stroke: var(--fg); stroke-width: 2px; fill: none; }
+    label.pos {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 0.92rem;
+    }
+    label.pos output {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--orange);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>pin_engine and project.v</h1>
+    <p class="lede">Tiny Tapeout wrapper <code>tt_um_posamokshith_proto</code>, and the UART byte it sends.</p>
+
+    <section>
+      <div class="head">
+        <div>
+          <h2>project.v</h2>
+          <p class="sub">Host pins to one engine</p>
+        </div>
+        <div class="legend">
+          <span><i class="swatch host"></i>Host write</span>
+          <span><i class="swatch tx"></i>tx</span>
+        </div>
+      </div>
+      <svg id="chip" class="diagram" role="img" focusable="false" aria-label="Module tt_um_posamokshith_proto. clk, rst_n, strobe ui 0, command ui 3 to 1, and uio data feed pin_engine. ena and ui 7 to 4 are unused. Commands 0 and 1 write period, 2 shift, 3 address, 4 imem, 5 pc, and 6 running. wait_left and tx are engine state. Outputs are uo 0 tx, uo 1 busy, uo 7 to 2 tied to 0, uio_out tied to 0, and uio_oe tied to 0. Each clock takes one branch: reset, write if stopped, hold wait_left, or execute imem at pc."></svg>
+    </section>
+
+    <section>
+      <h2>pin_engine</h2>
+      <p class="sub">Byte 0xA5, 4 clocks per bit</p>
+      <svg id="wave" class="diagram" role="img" focusable="false" aria-label="UART 8N1 waveform for 0xA5. Idle high, start low, data bits 1 0 1 0 0 1 0 1, stop high, then halt. Each start, data, and stop bit lasts 4 clocks."></svg>
+      <label class="pos">
+        <span>Frame position</span>
+        <output id="pos">start pc 0 0x20 SET 0</output>
+        <input id="range" type="range" min="0" max="11" step="1" value="1" aria-valuetext="start pc 0 0x20 SET 0">
+      </label>
+    </section>
+  </main>
+  <script>
+    (function () {
+      var chip = document.getElementById("chip");
+      var wave = document.getElementById("wave");
+      var range = document.getElementById("range");
+      var pos = document.getElementById("pos");
+      var NS = "http://www.w3.org/2000/svg";
+      var lastKey = "";
+
+      function el(parent, name, attrs) {
+        var node = document.createElementNS(NS, name);
+        if (attrs) {
+          Object.keys(attrs).forEach(function (key) {
+            node.setAttribute(key, attrs[key]);
+          });
+        }
+        parent.appendChild(node);
+        return node;
+      }
+
+      function clear(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+      }
+
+      function px(v) {
+        return String(Math.round(v * 10) / 10);
+      }
+
+      function text(parent, x, y, value, opts) {
+        var o = opts || {};
+        var classes = [];
+        if (o.dim) classes.push("dim");
+        if (!o.mono) classes.push("plain");
+        var attrs = {
+          x: px(x),
+          y: px(y),
+          "text-anchor": o.anchor || "start",
+          "dominant-baseline": "central"
+        };
+        if (classes.length) attrs.class = classes.join(" ");
+        var node = el(parent, "text", attrs);
+        node.textContent = value;
+        return node;
+      }
+
+      function line(parent, x1, y1, x2, y2, cls) {
+        return el(parent, "line", {
+          x1: px(x1),
+          y1: px(y1),
+          x2: px(x2),
+          y2: px(y2),
+          class: cls || "hair"
+        });
+      }
+
+      function hexByte(n) {
+        var s = n.toString(16).toUpperCase();
+        return "0x" + (s.length < 2 ? "0" + s : s);
+      }
+
+      function buildFrame() {
+        var bits = [];
+        var shift = 0xA5;
+        var i;
+        for (i = 0; i < 8; i += 1) {
+          var next = shift >>> 1;
+          bits.push({ level: shift & 1, from: shift, to: next });
+          shift = next;
+        }
+        var frame = [
+          { name: "idle", short: "I", level: 1, unit: 0.9, byte: "", line: "idle tx 1" },
+          { name: "start", short: "S", level: 0, unit: 1, byte: "20", line: "start pc 0 0x20 SET 0" }
+        ];
+        bits.forEach(function (bit, index) {
+          frame.push({
+            name: "b" + index,
+            short: String(index),
+            level: bit.level,
+            unit: 1,
+            byte: "30",
+            line: "b" + index + " pc " + (index + 1) + " 0x30 " + hexByte(bit.from) + " to " + hexByte(bit.to)
+          });
+        });
+        frame.push({ name: "stop", short: "St", level: 1, unit: 1, byte: "21", line: "stop pc 9 0x21 SET 1" });
+        frame.push({ name: "halt", short: "H", level: 1, unit: 0.9, byte: "00", line: "halt pc 10 0x00 HALT" });
+        return frame;
+      }
+
+      var frame = buildFrame();
+      range.max = String(frame.length - 1);
+
+      var inputs = [
+        { name: "clk" },
+        { name: "rst_n" },
+        { name: "ui[0] strobe", mark: "host" },
+        { name: "ui[3:1] cmd", mark: "host" },
+        { name: "uio[7:0] data", mark: "host" },
+        { name: "ena", rule: true },
+        { name: "ui[7:4]" }
+      ];
+      var engineRows = [
+        { name: "period", cmd: "0 lo, 1 hi", mark: "host" },
+        { name: "shift", cmd: "2", mark: "host" },
+        { name: "address", cmd: "3", mark: "host" },
+        { name: "imem", cmd: "4", mark: "host" },
+        { name: "pc", cmd: "5", mark: "host" },
+        { name: "running", cmd: "6", mark: "host" },
+        { name: "wait_left", rule: true },
+        { name: "tx", mark: "tx" }
+      ];
+      var steps = [
+        "1  Reset",
+        "2  Write if stopped",
+        "3  Hold wait_left",
+        "4  Execute imem[pc]"
+      ];
+      var outputs = [
+        { name: "uo[0] tx", mark: "tx" },
+        { name: "uo[1] busy" },
+        { name: "uo[7:2]", value: "0" },
+        { name: "uio_out", value: "0" },
+        { name: "uio_oe", value: "0" }
+      ];
+
+      function rowsHeight(rows) {
+        var h = 40;
+        rows.forEach(function (row) {
+          if (row.rule) h += 10;
+          h += 24;
+        });
+        return h;
+      }
+
+      function engineHeight() {
+        return rowsHeight(engineRows) + 116;
+      }
+
+      function paintTitle(svg, x, y, w, title, extra) {
+        text(svg, x + 12, y + 18, title, { mono: title === "pin_engine" });
+        if (extra) text(svg, x + w - 12, y + 18, extra, { mono: true, dim: true, anchor: "end" });
+        line(svg, x + 12, y + 32, x + w - 12, y + 32, "hair");
+      }
+
+      function paintRows(svg, x, y, w, rows) {
+        var cursor = y + 40;
+        rows.forEach(function (row) {
+          if (row.rule) {
+            line(svg, x + 12, cursor, x + w - 12, cursor, "hair");
+            cursor += 10;
+          }
+          var cy = cursor + 12;
+          var tx = x + 12;
+          if (row.mark) {
+            el(svg, "rect", {
+              x: px(tx),
+              y: px(cy - 4),
+              width: "8",
+              height: "8",
+              rx: "1",
+              class: row.mark === "tx" ? "tx-mark" : "host-mark"
+            });
+            tx += 14;
+          }
+          text(svg, tx, cy, row.name, { mono: true });
+          var right = row.cmd || row.value;
+          if (right) text(svg, x + w - 12, cy, right, { mono: true, anchor: "end" });
+          cursor += 24;
+        });
+        return cursor;
+      }
+
+      function paintSteps(svg, x, y) {
+        text(svg, x + 12, y + 10, "One clock", { dim: true });
+        var top = y + 28;
+        var rail = x + 20;
+        var label = x + 36;
+        steps.forEach(function (step, index) {
+          var cy = top + index * 22;
+          if (index < steps.length - 1) line(svg, rail, cy, rail, cy + 22, "hair");
+          line(svg, rail, cy, label - 6, cy, "hair");
+          text(svg, label, cy, step, { mono: true });
+        });
+      }
+
+      function card(svg, x, y, w, h) {
+        el(svg, "rect", {
+          x: px(x),
+          y: px(y),
+          width: px(w),
+          height: px(h),
+          rx: "8",
+          class: "box"
+        });
+      }
+
+      function arrow(svg, x1, y1, x2, y2) {
+        el(svg, "line", {
+          x1: px(x1),
+          y1: px(y1),
+          x2: px(x2),
+          y2: px(y2),
+          class: "wire",
+          "marker-end": "url(#arrow)"
+        });
+      }
+
+      function defs(svg) {
+        var d = el(svg, "defs");
+        var marker = el(d, "marker", {
+          id: "arrow",
+          viewBox: "0 0 8 8",
+          refX: "8",
+          refY: "4",
+          markerWidth: "8",
+          markerHeight: "8",
+          markerUnits: "userSpaceOnUse",
+          orient: "auto"
+        });
+        el(marker, "path", { d: "M0 1.2 L8 4 L0 6.8 Z", class: "arrow-head" });
+      }
+
+      function drawChip(svg, w) {
+        clear(svg);
+        defs(svg);
+        var pad = 8;
+        var inW = 200;
+        var outW = 168;
+        var gap = 48;
+        var hIn = rowsHeight(inputs);
+        var hEng = engineHeight();
+        var hOut = rowsHeight(outputs);
+        var engW = w - pad * 2 - inW - outW - gap * 2;
+        var horizontal = engW >= 260;
+        var height;
+
+        if (horizontal) {
+          var maxH = Math.max(hIn, hEng, hOut);
+          height = maxH + pad * 2;
+          var yIn = pad + (maxH - hIn) / 2;
+          var yEng = pad + (maxH - hEng) / 2;
+          var yOut = pad + (maxH - hOut) / 2;
+          var xIn = pad;
+          var xEng = xIn + inW + gap;
+          var xOut = xEng + engW + gap;
+          var mid = pad + maxH / 2;
+          card(svg, xIn, yIn, inW, hIn);
+          paintTitle(svg, xIn, yIn, inW, "Inputs");
+          paintRows(svg, xIn, yIn, inW, inputs);
+          card(svg, xEng, yEng, engW, hEng);
+          paintTitle(svg, xEng, yEng, engW, "pin_engine", "cmd");
+          paintSteps(svg, xEng, paintRows(svg, xEng, yEng, engW, engineRows) + 6);
+          card(svg, xOut, yOut, outW, hOut);
+          paintTitle(svg, xOut, yOut, outW, "Outputs");
+          paintRows(svg, xOut, yOut, outW, outputs);
+          arrow(svg, xIn + inW, mid, xEng, mid);
+          arrow(svg, xEng + engW, mid, xOut, mid);
+        } else {
+          var cw = w - pad * 2;
+          var y = pad;
+          var midX = pad + cw / 2;
+          card(svg, pad, y, cw, hIn);
+          paintTitle(svg, pad, y, cw, "Inputs");
+          paintRows(svg, pad, y, cw, inputs);
+          y += hIn;
+          arrow(svg, midX, y, midX, y + 32);
+          y += 32;
+          card(svg, pad, y, cw, hEng);
+          paintTitle(svg, pad, y, cw, "pin_engine", "cmd");
+          paintSteps(svg, pad, paintRows(svg, pad, y, cw, engineRows) + 6);
+          y += hEng;
+          arrow(svg, midX, y, midX, y + 32);
+          y += 32;
+          card(svg, pad, y, cw, hOut);
+          paintTitle(svg, pad, y, cw, "Outputs");
+          paintRows(svg, pad, y, cw, outputs);
+          y += hOut;
+          height = y + pad;
+        }
+
+        svg.setAttribute("viewBox", "0 0 " + w + " " + height);
+        svg.style.height = height + "px";
+      }
+
+      function fits(label, width) {
+        return label.length * 8.2 + 8 <= width;
+      }
+
+      function drawWave(svg, w, index) {
+        clear(svg);
+        var gutter = 36;
+        var usable = Math.max(40, w - gutter - 8);
+        var units = 0;
+        frame.forEach(function (seg) { units += seg.unit; });
+        var unitW = usable / units;
+        var cursor = gutter;
+        frame.forEach(function (seg) {
+          seg.x = cursor;
+          seg.w = seg.unit * unitW;
+          cursor += seg.w;
+        });
+
+        var hexY = 18;
+        var highY = 46;
+        var lowY = 102;
+        var nameY = 136;
+        var height = 160;
+        var selected = frame[index];
+
+        el(svg, "rect", {
+          x: px(selected.x),
+          y: "4",
+          width: px(Math.max(0, selected.w)),
+          height: "148",
+          class: "band"
+        });
+
+        text(svg, 4, highY, "1", { mono: true });
+        text(svg, 4, (highY + lowY) / 2, "tx", { mono: true });
+        text(svg, 4, lowY, "0", { mono: true });
+
+        var stroke = "";
+        var fill = "";
+        frame.forEach(function (seg, i) {
+          var y = seg.level ? highY : lowY;
+          var x2 = seg.x + seg.w;
+          if (i === 0) {
+            stroke = "M " + px(seg.x) + " " + px(y);
+            fill = "M " + px(seg.x) + " " + px(lowY) + " L " + px(seg.x) + " " + px(y);
+          } else {
+            stroke += " L " + px(seg.x) + " " + px(y);
+            fill += " L " + px(seg.x) + " " + px(y);
+          }
+          stroke += " L " + px(x2) + " " + px(y);
+          fill += " L " + px(x2) + " " + px(y);
+        });
+        var last = frame[frame.length - 1];
+        fill += " L " + px(last.x + last.w) + " " + px(lowY) + " Z";
+        el(svg, "path", { d: fill, class: "trace-fill" });
+        el(svg, "path", { d: stroke, class: "trace" });
+
+        var bit = frame[1];
+        var yBar = lowY + 14;
+        line(svg, bit.x, lowY + 6, bit.x, yBar, "hair");
+        line(svg, bit.x + bit.w, lowY + 6, bit.x + bit.w, yBar, "hair");
+        line(svg, bit.x, yBar, bit.x + bit.w, yBar, "hair");
+        if (bit.w >= 36) {
+          var k;
+          for (k = 1; k < 4; k += 1) {
+            var tick = bit.x + (bit.w * k) / 4;
+            line(svg, tick, yBar - 6, tick, yBar, "hair");
+          }
+        }
+
+        frame.forEach(function (seg) {
+          if (seg.byte) {
+            var byteText = seg.w >= 52 ? "0x" + seg.byte : seg.byte;
+            if (fits(byteText, seg.w)) {
+              text(svg, seg.x + seg.w / 2, hexY, byteText, { mono: true, anchor: "middle" });
+            }
+          }
+          var name = fits(seg.name, seg.w) ? seg.name : seg.short;
+          text(svg, seg.x + seg.w / 2, nameY, name, { mono: true, anchor: "middle" });
+        });
+
+        line(svg, selected.x + 2, nameY + 12, selected.x + selected.w - 2, nameY + 12, "sel");
+        svg.setAttribute("viewBox", "0 0 " + w + " " + height);
+        svg.style.height = height + "px";
+      }
+
+      function layout() {
+        var w = Math.floor(chip.parentElement.clientWidth);
+        if (w < 64) return;
+        var index = Math.max(0, Math.min(frame.length - 1, Number(range.value)));
+        var key = w + ":" + index;
+        if (key === lastKey) return;
+        lastKey = key;
+        drawChip(chip, w);
+        drawWave(wave, w, index);
+        pos.textContent = frame[index].line;
+        range.setAttribute("aria-valuetext", frame[index].line);
+      }
+
+      range.addEventListener("input", layout);
+      new ResizeObserver(layout).observe(chip.parentElement);
+      layout();
+    })();
+  </script>
+</body>
+</html>
