@@ -687,3 +687,68 @@ async def test_dual_shift(dut):
         got.append(uo(dut) & 0x3)
     assert got == [0b10, 0b10, 0b01, 0b01]
 
+
+@cocotb.test()
+async def test_ping_pong_bank_on_halt(dut):
+    """Filling the idle bank must not change the program that is running."""
+    await boot(dut)
+    await load_cfg(dut, t=16, roles=(TX, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, [0x2000, 0x0000])
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    assert tx_of(dut) == 0
+    assert busy_of(dut) == 1
+
+    await load_words(dut, [0x2200, 0x0000])
+    await load_bytes(dut, 0x4D, [1])
+    await load_bytes(dut, 0x40, [0x01, 0x00])
+
+    for _ in range(5):
+        await step(dut)
+        assert tx_of(dut) == 0
+        assert busy_of(dut) == 1
+
+    await step(dut)
+    assert busy_of(dut) == 1
+    assert tx_of(dut) == 0
+
+    await step(dut)
+    assert tx_of(dut) == 1
+    assert busy_of(dut) == 1
+    for _ in range(15):
+        await step(dut)
+        assert tx_of(dut) == 1
+        assert busy_of(dut) == 1
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert tx_of(dut) == 1
+
+
+@cocotb.test()
+async def test_ping_pong_bank_on_wrap(dut):
+    """Stepping off word 31 with the arm set starts the other bank at pc 0."""
+    await boot(dut)
+    await load_cfg(dut, t=1, roles=(TX, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, [0x7050] * 32)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    assert tx_of(dut) == 1
+    assert busy_of(dut) == 1
+
+    await load_words(dut, [0x2000, 0x0000])
+    await load_bytes(dut, 0x4D, [1])
+
+    for _ in range(24):
+        await step(dut)
+        assert tx_of(dut) == 1
+        assert busy_of(dut) == 1
+
+    await step(dut)
+    assert tx_of(dut) == 0
+    assert busy_of(dut) == 1
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert tx_of(dut) == 0
+

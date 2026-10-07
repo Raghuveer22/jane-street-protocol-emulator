@@ -60,7 +60,7 @@
         <tr><th>Name</th><th>Width</th><th>Who writes it</th><th>What it is</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>imem</code></td><td>32 words of 16 bits</td><td>Host, through the load map</td><td>The program. One word is one run step. The program counter is 5 bits.</td></tr>
+        <tr><td><code>imem</code></td><td>2 banks of 32 words, 16 bits each</td><td>Host, through the load map</td><td>The program. The engine reads the active bank. One word is one run step. The program counter is 5 bits. While running, stores go to the other bank.</td></tr>
         <tr><td><code>T</code>, <code>Tlo</code>, <code>Thi</code></td><td>16 bits each</td><td>Host</td><td>The three hold lengths a step can name. <code>T/2</code> is <code>T</code> shifted right by 1, not a fourth register.</td></tr>
         <tr><td>roles 0–3, side</td><td>one byte each</td><td>Host</td><td>Which physical pin each role uses, how it is driven, and the idle level it sits at during load.</td></tr>
         <tr><td><code>out_dir</code>, <code>in_dir</code>, <code>xreload</code></td><td>one byte together</td><td>Host</td><td>Bit order of the two shift registers, and the value <code>setx</code> loads into <code>x</code>.</td></tr>
@@ -69,7 +69,7 @@
         <tr><td>input shift</td><td>8 bits</td><td>The run, then the host reads it</td><td>The byte assembled from sampled pins.</td></tr>
         <tr><td><code>x</code></td><td>4 bits</td><td>The run</td><td>The loop counter. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> subtracts 1.</td></tr>
         <tr><td><code>wait_left</code></td><td>16 bits</td><td>The run</td><td>Ticks remaining in the current hold.</td></tr>
-        <tr><td><code>running</code></td><td>1 bit</td><td>Host sets it, <code>OP_HALT</code> clears it</td><td>1 while a program is executing. Config writes are ignored while it is 1. FIFO push and pop are not.</td></tr>
+        <tr><td><code>running</code></td><td>1 bit</td><td>Host sets it, <code>OP_HALT</code> clears it</td><td>1 while a program is executing. Config writes are ignored while it is 1, except byte <code>0x4D</code>. FIFO push and pop are not. An armed <code>OP_HALT</code> switches banks and leaves this set.</td></tr>
       </tbody>
     </table>
     <p>A period of 0 is stored as a hold of 1, so a pin always spends at least one tick at a new level. Reset, and every tick of the load phase, leaves each bound pin at its idle level.</p>
@@ -94,19 +94,19 @@ localparam [2:0] CMD_RUN     = 3'd4;  // running = 1, data ignored
 localparam [2:0] CMD_READ    = 3'd5;  // stopped: input shift. running: FIFO status
 localparam [2:0] CMD_PUSH    = 3'd6;  // enqueue one TX FIFO byte
 localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
-    <p>A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 ignores every command except <code>CMD_PUSH</code>, <code>CMD_POP</code>, and <code>CMD_READ</code>. <code>CMD_READ</code> while stopped drives the input shift. While running it drives the FIFO status byte. <code>CMD_POP</code> drives the oldest RX byte, or <code>0x00</code> if the FIFO is empty.</p>
+    <p>A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 ignores <code>CMD_PAYLOAD</code>, <code>CMD_PC</code>, and <code>CMD_RUN</code>. <code>CMD_ADDR</code> and <code>CMD_WRITE</code> still run, and an instruction-memory store lands in the bank that is not executing. <code>CMD_PUSH</code>, <code>CMD_POP</code>, and <code>CMD_READ</code> are accepted too. <code>CMD_READ</code> while stopped drives the input shift. While running it drives the FIFO status byte. <code>CMD_POP</code> drives the oldest RX byte, or <code>0x00</code> if the FIFO is empty.</p>
     <p>Each of those three turns <code>uio</code> into an output for that one tick. Every other tick leaves those pins as the program left them.</p>
     <p>The instruction at <code>pc</code> executes on the tick after the write that sets <code>running</code>. That write itself is still a load tick.</p>
     <p>The other way to expose the same fields is one command number each, with no address register: three wait registers as six byte writes, five pin bindings, the direction byte, an instruction-memory pointer, an instruction-memory write, the payload, the program counter, run, and read. That is sixteen commands. Sixteen needs <code>ui[4:1]</code>. The six-command map keeps the three-bit field and puts the twelve config bytes behind <code>CMD_ADDR</code> and <code>CMD_WRITE</code>, the same path the instruction words already use.</p>
 
     <h2>Load byte space</h2>
-    <p><code>CMD_ADDR</code> sets a byte address. Each <code>CMD_WRITE</code> stores the data byte there and adds 1. Instruction memory is the first 64 bytes, 32 words, low byte then high byte. The high byte commits the word. Config is the twelve bytes after that.</p>
+    <p><code>CMD_ADDR</code> sets a byte address. Each <code>CMD_WRITE</code> stores the data byte there and adds 1. Instruction memory is the first 64 bytes, 32 words of one bank, low byte then high byte. The high byte commits the word. While the machine is stopped those bytes are the active bank. While it is running they are the other bank. Config is the bytes after that.</p>
     <table>
       <thead>
         <tr><th>Address</th><th>Field</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>0x00</code>–<code>0x3F</code></td><td><code>imem</code>. Word <code>n</code> is bytes <code>2n</code> and <code>2n+1</code>, low then high.</td></tr>
+        <tr><td><code>0x00</code>–<code>0x3F</code></td><td>One bank of <code>imem</code>. Word <code>n</code> is bytes <code>2n</code> and <code>2n+1</code>, low then high. Stopped writes hit the active bank. Running writes hit the other.</td></tr>
         <tr><td><code>0x40</code>, <code>0x41</code></td><td><code>T</code>, low then high. UART's bit time. 5208 at 9600 baud, 434 at 115200.</td></tr>
         <tr><td><code>0x42</code>, <code>0x43</code></td><td><code>Tlo</code>, low then high. The low half of a clock this side generates.</td></tr>
         <tr><td><code>0x44</code>, <code>0x45</code></td><td><code>Thi</code>, low then high. The high half. SPI's fastest clock is <code>Tlo = Thi = 1</code>.</td></tr>
@@ -114,6 +114,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
         <tr><td><code>0x4A</code></td><td>The side pin, same binding byte.</td></tr>
         <tr><td><code>0x4B</code></td><td>Shift directions and the loop reload.</td></tr>
         <tr><td><code>0x4C</code></td><td>Shift width and base pin. Left at reset, the width is one bit and the role pin is used.</td></tr>
+        <tr><td><code>0x4D</code></td><td>Bit 0 arms a bank switch. Taken on <code>OP_HALT</code>, or when <code>pc</code> steps off word 31 without a backward branch. The banks flip, <code>pc</code> is 0, and <code>running</code> stays 1.</td></tr>
       </tbody>
     </table>
     <p>A binding byte is <code>{mode[1:0], idle, pin[4:0]}</code>.</p>

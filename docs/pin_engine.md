@@ -2,14 +2,14 @@
 
 `src/pin_engine.v` is an interpreter. UART transmit, UART receive, SPI, and I2C are programs it runs. The word format and those programs are `docs/instruction_definition.html`. The problem they are aimed at is `docs/info.md`.
 
-The host is the test, or later a controller on the board. It fills the interpreter's state, then starts it. The host is not an instruction. It writes one register per clock, and only while the program is stopped.
+The host is the test, or later a controller on the board. It fills the interpreter's state, then starts it. The host is not an instruction. It writes one register per clock. Config and the payload are accepted only while the program is stopped. Instruction words can also be written while it is running, and those words go into the bank that is not executing.
 
 ## State
 
 | Name | Width | Role |
 | --- | --- | --- |
-| `imem` | 32 words of 16 bits | The program. One word is one run step |
-| `pc` | 5 bits | Index into `imem` |
+| `imem` | 2 banks, 32 words of 16 bits each | The program. The engine reads the active bank. One word is one run step |
+| `pc` | 5 bits | Index into the active bank |
 | `T`, `Tlo`, `Thi` | 16 bits each | The hold lengths a step can name. `T/2` is `T` shifted right by 1 |
 | roles 0–3, side | one byte each | Which pin, how it is driven, and the idle level |
 | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` | packed in one byte | Bit order, FIFO refill, and the value `setx` loads |
@@ -27,7 +27,7 @@ On each rising clock the interpreter does one of these, in order:
 if reset:                          pins at idle, imem = all HALT, running = 0
 else if stopped and host writes:   update the register named by the command
 else if running and wait_left > 0: wait_left -= 1
-else if running:                   execute imem[pc]
+else if running:                   execute imem[active_bank][pc]
 ```
 
 The opcode is the high nibble of the instruction word.
@@ -45,7 +45,9 @@ The opcode is the high nibble of the instruction word.
 
 `side` on `SET`, `SHIFT`, `IN`, `OD`, and `ODSHIFT` writes the side pin on that same tick. A hold length of 0 is stored as a hold of 1. The hold counter is loaded with `ticks - 1` on the clock the instruction runs, so the level lasts `ticks` clocks. `hold = none` and `hold = 1` both last one clock.
 
-The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, config and payload writes are dropped. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock, and a push does not steal a tick from a hold. `CMD_RUN` clears the input shift.
+The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, config and payload writes are dropped, except a store into the idle instruction bank and byte `0x4D`. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock, and a push does not steal a tick from a hold. `CMD_RUN` clears the input shift.
+
+`0x4D` bit 0 arms a bank switch. `OP_HALT` takes it, and so does the step that would leave word 31 without a backward branch. The banks flip, `pc` becomes 0, and `running` stays 1. The program that was running is now the idle bank, so the host can refill it for the next handoff. A loop that branches backward never hands off. With the arm clear, `OP_HALT` still stops.
 
 ## Pins
 
@@ -78,7 +80,7 @@ Push-pull drives 0 and 1. Open-drain pull sets the enable and drives 0. Open-dra
 | 6 `CMD_PUSH` | Enqueue one TX byte. Legal while running |
 | 7 `CMD_POP` | Dequeue one RX byte onto `uio`. Legal while running |
 
-`CMD_ADDR` / `CMD_WRITE` walk a flat byte space. `0x00`–`0x3F` is `imem`, low byte then high byte. `0x40`–`0x4B` is `T`, `Tlo`, `Thi`, the five bindings, and the direction byte. The map is in `docs/opcodes.md`.
+`CMD_ADDR` / `CMD_WRITE` walk a flat byte space. `0x00`–`0x3F` is one bank of `imem`, low byte then high byte. While stopped that is the active bank. While running it is the other one. `0x40`–`0x4C` is `T`, `Tlo`, `Thi`, the five bindings, the direction byte, and the shift width. `0x4D` bit 0 arms the bank switch. The map is in `docs/opcodes.md`.
 
 The programs:
 
@@ -103,6 +105,6 @@ source .venv/bin/activate
 cd test && make -B
 ```
 
-`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, config writes dropped while running, reset clearing `imem` back to `HALT`, and back-to-back UART and SPI through the FIFOs. The toggle program is there so a passing test means the waveform came from `imem`.
+`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, config writes dropped while running, reset clearing `imem` back to `HALT`, back-to-back UART and SPI through the FIFOs, and a bank handoff on `HALT` and on the step off word 31. The toggle program is there so a passing test means the waveform came from `imem`.
 
 `make -f Makefile.uart` in `test/` is the longer UART transmitter bench. It assembles `prog/uart_8n1.asm` and checks the wire at several bit times, including 434 and 5208.

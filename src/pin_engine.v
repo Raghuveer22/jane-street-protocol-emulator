@@ -1,5 +1,27 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: CERN-OHL-S-2.0
+ * SPDX-FileCopyrightText: 2026 Posa Mokshith
+ *
+ * Copyright Posa Mokshith 2026.
+ *
+ * This source describes Open Hardware and is licensed under the CERN-OHL-S v2.
+ *
+ * You may redistribute and modify this pin engine and make products
+ * using it under the terms of the CERN-OHL-S v2
+ * (https://ohwr.org/cern_ohl_s_v2.txt).
+ * Including this file in a larger design makes that larger design
+ * modified Covered Source. If you convey the sources, a bitstream, a
+ * GDS, or a chip, you must make the complete source of that work
+ * public under CERN-OHL-S.
+ *
+ * This source is distributed WITHOUT ANY EXPRESS OR IMPLIED WARRANTY,
+ * INCLUDING OF MERCHANTABILITY, SATISFACTORY QUALITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE. Please see the CERN-OHL-S v2 for applicable
+ * conditions.
+ *
+ * Source Location: https://github.com/Raghuveer22/jane-street-protocol-emulator
+ * A Product made from this source must state that Source Location in
+ * its documentation.
  *
  * Programmable pin engine. UART, SPI, and I2C are programs in imem.
  * The 16-bit word, the load map, and those programs are documented in
@@ -14,10 +36,16 @@
  *   OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
  *   OP_HOLD    0x7  change no pin, only load the wait
  *
- * Config writes are ignored while a program is running. CMD_PUSH and
- * CMD_POP are not: they move one byte into the TX FIFO or out of the RX
- * FIFO on that clock, including during a hold. Autopull and autopush are
- * bits in the direction byte. Off, this is the one-byte machine.
+ * Instruction memory is two banks of 32 words. The engine fetches the
+ * active bank. While stopped, CMD_WRITE stores into that bank. While
+ * running, CMD_WRITE stores into the other bank, so a host fill cannot
+ * change the program that is executing. Byte 0x4D bit 0 arms a switch.
+ * The switch happens on OP_HALT, or when pc steps off word 31 without a
+ * backward branch: the banks flip, pc returns to 0, and running stays 1.
+ * Other config writes are ignored while a program is running. CMD_PUSH
+ * and CMD_POP are not: they move one byte into the TX FIFO or out of the
+ * RX FIFO on that clock, including during a hold. Autopull and autopush
+ * are bits in the direction byte. Off, this is the one-byte machine.
  *
  * The instruction at pc runs on the clock after CMD_RUN. A hold length of
  * 0 is a hold of 1. uo[7] is `running`, so pin 15 is not a protocol pin.
@@ -54,7 +82,9 @@ module pin_engine (
     localparam [3:0] OP_ODSHIFT = 4'h6;
     localparam [3:0] OP_HOLD    = 4'h7;
 
-    reg [15:0] imem [0:31];
+    reg [15:0] imem [0:1][0:31];
+    reg        active_bank;
+    reg        switch_pend;
     reg [15:0] t_reg, tlo_reg, thi_reg;
     reg [7:0]  bind0, bind1, bind2, bind3, side_bind;
     reg        out_dir, in_dir, autopull, autopush;
@@ -83,7 +113,7 @@ module pin_engine (
     wire [2:0] cmd  = ui[3:1];
     wire [7:0] wdata = uio_in;
 
-    wire [15:0] insn     = imem[pc];
+    wire [15:0] insn     = imem[active_bank][pc];
     wire [3:0]  op       = insn[15:12];
     wire [1:0]  role     = insn[11:10];
     wire        val      = insn[9];
@@ -137,7 +167,7 @@ module pin_engine (
     };
     wire [7:0] rx_head = (rx_count != 3'd0) ? rx_mem[rx_r] : 8'h00;
 
-    integer i;
+    integer i, b;
 
     assign uo      = {running, uo_q[6:0]};
     assign uio_out = show_ishift ? ishift :
@@ -341,7 +371,14 @@ module pin_engine (
         input [2:0] hold_code;
         begin
             xcnt      <= x_next;
-            pc        <= pc_next;
+            // Word 31 stepping forward is the end of this bank. A backward
+            // branch stays here, so a loop does not hand off.
+            if (switch_pend && !take_back && (pc == 5'd31)) begin
+                active_bank <= ~active_bank;
+                pc          <= 5'd0;
+                switch_pend <= 1'b0;
+            end else
+                pc <= pc_next;
             wait_left <= hold_ticks(hold_code) - 16'd1;
             // A backward branch is the frame seam. Stall there, after this
             // instruction's pins and hold are committed, if the next byte
@@ -401,9 +438,11 @@ module pin_engine (
             base_pin   <= 5'd0;
             oshift    <= 8'd0;
             ishift    <= 8'd0;
-            pc        <= 5'd0;
-            waddr     <= 8'd0;
-            running   <= 1'b0;
+            pc          <= 5'd0;
+            waddr       <= 8'd0;
+            running     <= 1'b0;
+            active_bank <= 1'b0;
+            switch_pend <= 1'b0;
             wait_left <= 16'd0;
             xcnt      <= 4'd0;
             tx_w      <= 2'd0;
@@ -422,8 +461,9 @@ module pin_engine (
             uo_q      <= 8'h01;
             uio_q     <= 8'h00;
             uio_oe_q  <= 8'h00;
-            for (i = 0; i < 32; i = i + 1)
-                imem[i] <= 16'h0000;
+            for (b = 0; b < 2; b = b + 1)
+                for (i = 0; i < 32; i = i + 1)
+                    imem[b][i] <= 16'h0000;
         end else begin
             host_push_b     = wr && (cmd == CMD_PUSH);
             host_pop_b      = wr && (cmd == CMD_POP);
@@ -433,6 +473,26 @@ module pin_engine (
             rx_over_b       = 1'b0;
             tx_over_b       = 1'b0;
 
+            // The running program is the active bank. Fills land in the
+            // other one. 0x4D bit 0 requests the handoff; it does not
+            // change pins or the live config.
+            if (running && wr) begin
+                case (cmd)
+                    CMD_ADDR: waddr <= wdata;
+                    CMD_WRITE: begin
+                        if (waddr < 8'h40) begin
+                            if (waddr[0])
+                                imem[~active_bank][waddr[5:1]][15:8] <= wdata;
+                            else
+                                imem[~active_bank][waddr[5:1]][7:0]  <= wdata;
+                        end else if (waddr == 8'h4D)
+                            switch_pend <= wdata[0];
+                        waddr <= waddr + 8'd1;
+                    end
+                    default: ;
+                endcase
+            end
+
             if (!running) begin
                 if (wr) begin
                     case (cmd)
@@ -440,9 +500,9 @@ module pin_engine (
                         CMD_WRITE: begin
                             if (waddr < 8'h40) begin
                                 if (waddr[0])
-                                    imem[waddr[5:1]][15:8] <= wdata;
+                                    imem[active_bank][waddr[5:1]][15:8] <= wdata;
                                 else
-                                    imem[waddr[5:1]][7:0]  <= wdata;
+                                    imem[active_bank][waddr[5:1]][7:0]  <= wdata;
                             end else begin
                                 case (waddr)
                                     8'h40: t_reg[7:0]   <= wdata;
@@ -482,6 +542,7 @@ module pin_engine (
                                         width_code <= wdata[6:5];
                                         base_pin   <= wdata[4:0];
                                     end
+                                    8'h4D: switch_pend <= wdata[0];
                                     default: ;
                                 endcase
                             end
@@ -534,8 +595,14 @@ module pin_engine (
             end else begin
                 case (op)
                     OP_HALT: begin
-                        running  <= 1'b0;
-                        stall_tx <= 1'b0;
+                        if (switch_pend) begin
+                            active_bank <= ~active_bank;
+                            pc          <= 5'd0;
+                            switch_pend <= 1'b0;
+                        end else begin
+                            running  <= 1'b0;
+                            stall_tx <= 1'b0;
+                        end
                     end
                     OP_WAIT: begin
                         if (sampled == val)
@@ -607,7 +674,14 @@ module pin_engine (
                         retire(hold);
                     end
                     OP_HOLD: retire(hold);
-                    default: pc <= pc + 5'd1;
+                    default: begin
+                        if (switch_pend && (pc == 5'd31)) begin
+                            active_bank <= ~active_bank;
+                            pc          <= 5'd0;
+                            switch_pend <= 1'b0;
+                        end else
+                            pc <= pc + 5'd1;
+                    end
                 endcase
             end
 

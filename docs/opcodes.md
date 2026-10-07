@@ -2,7 +2,7 @@
 
 The host loads a program with six commands. The program is 16-bit words. The opcode is the high nibble of each word. The full encoding, the load map, and the four example programs are in `docs/instruction_definition.html`.
 
-Writes only take while `running` is 0. The strobe is `ui[0]` for one tick. The command is `ui[3:1]`. The data byte is `uio[7:0]`.
+Config and payload writes take while `running` is 0. Instruction-memory writes also take while `running` is 1, and those land in the idle bank. The strobe is `ui[0]` for one tick. The command is `ui[3:1]`. The data byte is `uio[7:0]`.
 
 ## Commands
 
@@ -17,13 +17,13 @@ CMD_PUSH    6   enqueue one byte in the TX FIFO. legal while running
 CMD_POP     7   dequeue one byte from the RX FIFO onto uio. legal while running
 ```
 
-`CMD_ADDR`, `CMD_WRITE`, `CMD_PAYLOAD`, `CMD_PC`, and `CMD_RUN` are ignored while `running` is 1. `CMD_PUSH` and `CMD_POP` are not. A push during a hold does not skip a tick of that hold. `CMD_READ` and `CMD_POP` drive `uio` as an output for that tick, so a program that is using `uio` as a wire (I2C) cannot take them mid-transfer. The instruction at `pc` runs on the tick after `CMD_RUN`.
+`CMD_PAYLOAD`, `CMD_PC`, and `CMD_RUN` are ignored while `running` is 1. `CMD_ADDR` and `CMD_WRITE` are not: they fill the bank the engine is not executing, and byte `0x4D` can arm a switch. Config bytes other than `0x4D` are ignored while running. `CMD_PUSH` and `CMD_POP` are accepted either way. A push during a hold does not skip a tick of that hold. `CMD_READ` and `CMD_POP` drive `uio` as an output for that tick, so a program that is using `uio` as a wire (I2C) cannot take them mid-transfer. The instruction at `pc` runs on the tick after `CMD_RUN`.
 
 `CMD_ADDR` / `CMD_WRITE` walk a flat byte space:
 
 | Address | Field |
 | --- | --- |
-| `0x00`–`0x3F` | `imem`, 32 words, low byte then high byte |
+| `0x00`–`0x3F` | One bank of `imem`, 32 words, low byte then high byte. Stopped: the bank the engine runs. Running: the other bank |
 | `0x40`, `0x41` | `T`, UART bit time |
 | `0x42`, `0x43` | `Tlo` |
 | `0x44`, `0x45` | `Thi` |
@@ -31,6 +31,7 @@ CMD_POP     7   dequeue one byte from the RX FIFO onto uio. legal while running
 | `0x4A` | side-pin binding |
 | `0x4B` | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` |
 | `0x4C` | shift width and the base pin. Absent means width 1 |
+| `0x4D` | bit 0 arms a bank switch. The engine takes it on `OP_HALT`, or when `pc` steps off word 31 without a backward branch: banks flip, `pc` is 0, `running` stays 1 |
 
 A protocol load is `CMD_ADDR 0x40` plus twelve writes, then `CMD_ADDR 0x00` plus two writes per word. A later frame of the same protocol is three ticks: `CMD_PAYLOAD`, `CMD_PC`, `CMD_RUN`. After a receive or a full-duplex transfer, `CMD_READ` returns the assembled byte.
 

@@ -46,7 +46,7 @@ A host write is accepted only while `running` is 0.
 
 Commands are `ui[3:1]`. The data byte is `uio`. The binding and `T` are bytes at `0x40` and up, written with `CMD_ADDR` then `CMD_WRITE`. One later byte is three ticks: `CMD_PAYLOAD`, `CMD_PC` 0, `CMD_RUN`.
 
-`CMD_RUN` does not execute `imem[0]`. That instruction runs on the next rising clock. From then until `HALT`, a host write is dropped.
+`CMD_RUN` does not execute `imem[0]`. That instruction runs on the next rising clock. From then until `HALT`, a config or payload write is dropped. An instruction-memory write during the run goes to the other bank.
 
 On the clock a `SET` or `SHIFT` runs, `wait_left` is loaded with `T - 1`. A stored `T` of 0 holds for 1 clock. One execute clock plus `T - 1` countdown clocks is `T` clocks at the new level.
 

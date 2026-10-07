@@ -1,5 +1,20 @@
 /*
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: CERN-OHL-S-2.0
+ * SPDX-FileCopyrightText: 2026 Posa Mokshith
+ *
+ * Copyright Posa Mokshith 2026.
+ *
+ * This source describes Open Hardware and is licensed under the CERN-OHL-S v2
+ * (https://ohwr.org/cern_ohl_s_v2.txt). It instantiates the pin engine in
+ * pin_engine.v. Conveying a product built from this top requires the
+ * complete source to be made public under CERN-OHL-S.
+ *
+ * This source is distributed WITHOUT ANY EXPRESS OR IMPLIED WARRANTY,
+ * INCLUDING OF MERCHANTABILITY, SATISFACTORY QUALITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE. Please see the CERN-OHL-S v2 for applicable
+ * conditions.
+ *
+ * Source Location: https://github.com/Raghuveer22/jane-street-protocol-emulator
  *
  * Tiny Tapeout top for the Jane Street protocol-emulator ASIC.
  * UART, SPI, and I2C are programs loaded into pin_engine.
