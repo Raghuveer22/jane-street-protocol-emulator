@@ -1,8 +1,8 @@
 # Publish docs/instruction_definition.html to GitHub Pages for sharing.
 # Site: https://raghuveer22.github.io/jane-street-protocol-emulator/instruction_definition.html
 #
-# Note: the GDS "viewer" job also deploys to Pages. Whichever run finishes
-# last owns the site. Re-run this workflow after a GDS build if the doc URL 404s.
+# The GDS "viewer" job also deploys to Pages (3D OAS redirect). This workflow
+# re-runs after gds completes so the instruction page stays shareable.
 
 name: pages-docs
 
@@ -13,6 +13,9 @@ on:
       - "docs/instruction_definition.html"
       - "docs/index.html"
       - ".github/workflows/pages-docs.yaml"
+  workflow_run:
+    workflows: [gds]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
