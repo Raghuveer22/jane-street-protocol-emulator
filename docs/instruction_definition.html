@@ -69,13 +69,13 @@
         <tr><td>input shift</td><td>8 bits</td><td>The run, then the host reads it</td><td>The byte assembled from sampled pins.</td></tr>
         <tr><td><code>x</code></td><td>4 bits</td><td>The run</td><td>The loop counter. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> subtracts 1.</td></tr>
         <tr><td><code>wait_left</code></td><td>16 bits</td><td>The run</td><td>Ticks remaining in the current hold.</td></tr>
-        <tr><td><code>running</code></td><td>1 bit</td><td>Host sets it, <code>OP_HALT</code> clears it</td><td>1 while a program is executing. Host writes other than a read are ignored while it is 1.</td></tr>
+        <tr><td><code>running</code></td><td>1 bit</td><td>Host sets it, <code>OP_HALT</code> clears it</td><td>1 while a program is executing. Config writes are ignored while it is 1. FIFO push and pop are not.</td></tr>
       </tbody>
     </table>
     <p>A period of 0 is stored as a hold of 1, so a pin always spends at least one tick at a new level. Reset, and every tick of the load phase, leaves each bound pin at its idle level.</p>
 
     <h2>Host interface</h2>
-    <p>The host writes one field per tick while <code>running</code> is 0. On that tick it presents three values: a strobe, a command, and a data byte.</p>
+    <p>The host writes one config field per tick while <code>running</code> is 0. On that tick it presents three values: a strobe, a command, and a data byte. <code>CMD_PUSH</code> and <code>CMD_POP</code> are also accepted while <code>running</code> is 1.</p>
     <table>
       <thead>
         <tr><th>Pins</th><th>Role</th></tr>
@@ -83,7 +83,7 @@
       <tbody>
         <tr><td><code>ui[0]</code></td><td>Write strobe. 1 for exactly one tick, then 0.</td></tr>
         <tr><td><code>ui[3:1]</code></td><td>Command number. Three bits, eight slots. Six are used.</td></tr>
-        <tr><td><code>uio[7:0]</code></td><td>Data byte for that command. During a run these pins can be protocol wires, because load and run never share a tick.</td></tr>
+        <tr><td><code>uio[7:0]</code></td><td>Data byte for that command. A push or pop during a run uses this byte too, so a protocol that lives on <code>uio</code> cannot take one mid-transfer.</td></tr>
       </tbody>
     </table>
 <pre>localparam [2:0] CMD_ADDR    = 3'd0;  // set the load address
@@ -91,9 +91,11 @@ localparam [2:0] CMD_WRITE   = 3'd1;  // store one byte there, then address + 1
 localparam [2:0] CMD_PAYLOAD = 3'd2;  // output shift register
 localparam [2:0] CMD_PC      = 3'd3;  // first instruction of this run
 localparam [2:0] CMD_RUN     = 3'd4;  // running = 1, data ignored
-localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one tick</pre>
-    <p>Two command numbers, 6 and 7, are spare. A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 also changes nothing, except that <code>CMD_READ</code> is only legal while the machine is stopped.</p>
-    <p><code>CMD_READ</code> turns <code>uio</code> into an output for that one tick and drives the input shift register onto it. Every other stopped tick, and every running tick that is not using <code>uio</code> as a protocol wire, leaves those pins as inputs.</p>
+localparam [2:0] CMD_READ    = 3'd5;  // stopped: input shift. running: FIFO status
+localparam [2:0] CMD_PUSH    = 3'd6;  // enqueue one TX FIFO byte
+localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
+    <p>A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 ignores every command except <code>CMD_PUSH</code>, <code>CMD_POP</code>, and <code>CMD_READ</code>. <code>CMD_READ</code> while stopped drives the input shift. While running it drives the FIFO status byte. <code>CMD_POP</code> drives the oldest RX byte, or <code>0x00</code> if the FIFO is empty.</p>
+    <p>Each of those three turns <code>uio</code> into an output for that one tick. Every other tick leaves those pins as the program left them.</p>
     <p>The instruction at <code>pc</code> executes on the tick after the write that sets <code>running</code>. That write itself is still a load tick.</p>
     <p>The other way to expose the same fields is one command number each, with no address register: three wait registers as six byte writes, five pin bindings, the direction byte, an instruction-memory pointer, an instruction-memory write, the payload, the program counter, run, and read. That is sixteen commands. Sixteen needs <code>ui[4:1]</code>. The six-command map keeps the three-bit field and puts the twelve config bytes behind <code>CMD_ADDR</code> and <code>CMD_WRITE</code>, the same path the instruction words already use.</p>
 
@@ -124,7 +126,7 @@ localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one 
         <tr><td>4:0</td><td><code>pin</code></td><td>0–7 are <code>ui</code>, 8–15 are <code>uo</code>, 16–23 are <code>uio</code>.</td></tr>
       </tbody>
     </table>
-    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, 2'b00, xreload[3:0]}</code>.</p>
+    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, autopull, autopush, xreload[3:0]}</code>.</p>
     <table>
       <thead>
         <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>
@@ -132,7 +134,8 @@ localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one 
       <tbody>
         <tr><td>7</td><td><code>out_dir</code></td><td>0 shifts bit 0 out first. 1 shifts bit 7 out first.</td></tr>
         <tr><td>6</td><td><code>in_dir</code></td><td>The same choice for the input shift. The first sample becomes bit 0 when this is 0, and bit 7 when it is 1.</td></tr>
-        <tr><td>5:4</td><td></td><td>Written as 0.</td></tr>
+        <tr><td>5</td><td><code>autopull</code></td><td>1: the 8th shift of a byte loads the next TX FIFO byte. A looping branch with the FIFO empty holds the pins.</td></tr>
+        <tr><td>4</td><td><code>autopush</code></td><td>1: the 8th sample is copied into the RX FIFO. 0 leaves the one-byte machine.</td></tr>
         <tr><td>3:0</td><td><code>xreload</code></td><td>What <code>setx</code> loads into <code>x</code>. 8 for a data byte. 9 for a frame that loops a ninth bit.</td></tr>
       </tbody>
     </table>
