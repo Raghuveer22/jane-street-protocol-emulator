@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instruction definition</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f3;
+      --fg: #1c1917;
+      --muted: #57534e;
+      --card: #ffffff;
+      --line: #e7e5e4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917;
+        --fg: #fafaf9;
+        --muted: #a8a29e;
+        --card: #292524;
+        --line: #44403c;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 17px/1.55 ui-sans-serif, system-ui, sans-serif;
+    }
+    main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.2rem; font-weight: 600; margin: 2.2rem 0 0.6rem; }
+    h3 { font-size: 1.05rem; font-weight: 600; margin: 1.4rem 0 0.4rem; }
+    p { margin: 0.7rem 0; }
+    .note { color: var(--muted); }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0 0; font-size: 0.92rem; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 0.45rem 0.5rem 0.45rem 0; vertical-align: top; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code { font-size: 0.92em; }
+    pre {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 0.85rem 1rem;
+      overflow-x: auto;
+      font-size: 0.86rem;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Instruction definition</h1>
+    <p class="note">The 16-bit instruction set and the six host commands that load it. The readable form of the same programs is in <code>docs/machine_definition.html</code>. The protocol facts those programs have to cover are in <code>docs/protocol_model.md</code>.</p>
+
+    <h2>Machine state</h2>
+    <p>Two groups of registers. The host fills the first group while the machine is stopped. The run owns the second group.</p>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Width</th><th>Who writes it</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>imem</code></td><td>32 words of 16 bits</td><td>Host, through the load map</td><td>The program. One word is one run step. The program counter is 5 bits.</td></tr>
+        <tr><td><code>T</code>, <code>Tlo</code>, <code>Thi</code></td><td>16 bits each</td><td>Host</td><td>The three hold lengths a step can name. <code>T/2</code> is <code>T</code> shifted right by 1, not a fourth register.</td></tr>
+        <tr><td>roles 0–3, side</td><td>one byte each</td><td>Host</td><td>Which physical pin each role uses, how it is driven, and the idle level it sits at during load.</td></tr>
+        <tr><td><code>out_dir</code>, <code>in_dir</code>, <code>xreload</code></td><td>one byte together</td><td>Host</td><td>Bit order of the two shift registers, and the value <code>setx</code> loads into <code>x</code>.</td></tr>
+        <tr><td>output shift</td><td>8 bits</td><td>Host, once per frame</td><td>The payload byte to send.</td></tr>
+        <tr><td><code>pc</code></td><td>5 bits</td><td>Host at the start of a run, then the sequencer</td><td>The address of the next instruction.</td></tr>
+        <tr><td>input shift</td><td>8 bits</td><td>The run, then the host reads it</td><td>The byte assembled from sampled pins.</td></tr>
+        <tr><td><code>x</code></td><td>4 bits</td><td>The run</td><td>The loop counter. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> subtracts 1.</td></tr>
+        <tr><td><code>wait_left</code></td><td>16 bits</td><td>The run</td><td>Ticks remaining in the current hold.</td></tr>
+        <tr><td><code>running</code></td><td>1 bit</td><td>Host sets it, <code>OP_HALT</code> clears it</td><td>1 while a program is executing. Host writes other than a read are ignored while it is 1.</td></tr>
+      </tbody>
+    </table>
+    <p>A period of 0 is stored as a hold of 1, so a pin always spends at least one tick at a new level. Reset, and every tick of the load phase, leaves each bound pin at its idle level.</p>
+
+    <h2>Host interface</h2>
+    <p>The host writes one field per tick while <code>running</code> is 0. On that tick it presents three values: a strobe, a command, and a data byte.</p>
+    <table>
+      <thead>
+        <tr><th>Pins</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>ui[0]</code></td><td>Write strobe. 1 for exactly one tick, then 0.</td></tr>
+        <tr><td><code>ui[3:1]</code></td><td>Command number. Three bits, eight slots. Six are used.</td></tr>
+        <tr><td><code>uio[7:0]</code></td><td>Data byte for that command. During a run these pins can be protocol wires, because load and run never share a tick.</td></tr>
+      </tbody>
+    </table>
+<pre>localparam [2:0] CMD_ADDR    = 3'd0;  // set the load address
+localparam [2:0] CMD_WRITE   = 3'd1;  // store one byte there, then address + 1
+localparam [2:0] CMD_PAYLOAD = 3'd2;  // output shift register
+localparam [2:0] CMD_PC      = 3'd3;  // first instruction of this run
+localparam [2:0] CMD_RUN     = 3'd4;  // running = 1, data ignored
+localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one tick</pre>
+    <p>Two command numbers, 6 and 7, are spare. A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 also changes nothing, except that <code>CMD_READ</code> is only legal while the machine is stopped.</p>
+    <p><code>CMD_READ</code> turns <code>uio</code> into an output for that one tick and drives the input shift register onto it. Every other stopped tick, and every running tick that is not using <code>uio</code> as a protocol wire, leaves those pins as inputs.</p>
+    <p>The instruction at <code>pc</code> executes on the tick after the write that sets <code>running</code>. That write itself is still a load tick.</p>
+    <p>The other way to expose the same fields is one command number each, with no address register: three wait registers as six byte writes, five pin bindings, the direction byte, an instruction-memory pointer, an instruction-memory write, the payload, the program counter, run, and read. That is sixteen commands. Sixteen needs <code>ui[4:1]</code>. The six-command map keeps the three-bit field and puts the twelve config bytes behind <code>CMD_ADDR</code> and <code>CMD_WRITE</code>, the same path the instruction words already use.</p>
+
+    <h2>Load byte space</h2>
+    <p><code>CMD_ADDR</code> sets a byte address. Each <code>CMD_WRITE</code> stores the data byte there and adds 1. Instruction memory is the first 64 bytes, 32 words, low byte then high byte. The high byte commits the word. Config is the twelve bytes after that.</p>
+    <table>
+      <thead>
+        <tr><th>Address</th><th>Field</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>0x00</code>–<code>0x3F</code></td><td><code>imem</code>. Word <code>n</code> is bytes <code>2n</code> and <code>2n+1</code>, low then high.</td></tr>
+        <tr><td><code>0x40</code>, <code>0x41</code></td><td><code>T</code>, low then high. UART's bit time. 5208 at 9600 baud, 434 at 115200.</td></tr>
+        <tr><td><code>0x42</code>, <code>0x43</code></td><td><code>Tlo</code>, low then high. The low half of a clock this side generates.</td></tr>
+        <tr><td><code>0x44</code>, <code>0x45</code></td><td><code>Thi</code>, low then high. The high half. SPI's fastest clock is <code>Tlo = Thi = 1</code>.</td></tr>
+        <tr><td><code>0x46</code>–<code>0x49</code></td><td>Role 0 to role 3, one binding byte each.</td></tr>
+        <tr><td><code>0x4A</code></td><td>The side pin, same binding byte.</td></tr>
+        <tr><td><code>0x4B</code></td><td>Shift directions and the loop reload.</td></tr>
+      </tbody>
+    </table>
+    <p>A binding byte is <code>{mode[1:0], idle, pin[4:0]}</code>.</p>
+    <table>
+      <thead>
+        <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>7:6</td><td><code>mode</code></td><td>0 input, 1 push-pull, 2 open-drain. 3 is unused.</td></tr>
+        <tr><td>5</td><td><code>idle</code></td><td>The level the pin rests at during load and after reset. Push-pull: the driven level. Open-drain: 0 pulls, 1 releases. TX and CS idle at 1. SDA and SCL idle released. SCK idles at the mode's rest level.</td></tr>
+        <tr><td>4:0</td><td><code>pin</code></td><td>0–7 are <code>ui</code>, 8–15 are <code>uo</code>, 16–23 are <code>uio</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, 2'b00, xreload[3:0]}</code>.</p>
+    <table>
+      <thead>
+        <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>7</td><td><code>out_dir</code></td><td>0 shifts bit 0 out first. 1 shifts bit 7 out first.</td></tr>
+        <tr><td>6</td><td><code>in_dir</code></td><td>The same choice for the input shift. The first sample becomes bit 0 when this is 0, and bit 7 when it is 1.</td></tr>
+        <tr><td>5:4</td><td></td><td>Written as 0.</td></tr>
+        <tr><td>3:0</td><td><code>xreload</code></td><td>What <code>setx</code> loads into <code>x</code>. 8 for a data byte. 9 for a frame that loops a ninth bit.</td></tr>
+      </tbody>
+    </table>
+    <p>Loading a protocol is <code>CMD_ADDR 0x40</code> plus twelve writes, then <code>CMD_ADDR 0x00</code> plus two writes per instruction word. Running a later frame of the same protocol is three ticks: <code>CMD_PAYLOAD</code>, <code>CMD_PC</code>, <code>CMD_RUN</code>. After a receiver or a full-duplex transfer stops, <code>CMD_READ</code> presents the assembled byte.</p>
+
+    <h2>A UART sender load</h2>
+    <p>Role 0 is TX, push-pull, idle 1, on <code>uo[0]</code>, which is pin 8. The binding byte is <code>0x68</code>: mode 1, idle 1, pin 8. No side pin. Shift bit 0 first, <code>xreload = 8</code>. <code>T = 5208</code> (<code>0x1458</code>), 9600 baud. The payload is <code>0xA5</code>. Each line is one tick with the strobe set. The following tick has the strobe at 0.</p>
+    <table>
+      <thead>
+        <tr><th>Command</th><th>Data</th><th>Effect</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>CMD_ADDR</code></td><td><code>0x40</code></td><td>Load address = config.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x58</code></td><td><code>T[7:0]</code>.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x14</code></td><td><code>T[15:8]</code>. <code>T = 5208</code>.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td><code>Tlo</code>, unused by this program.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td></td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td><code>Thi</code>, unused.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td></td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x68</code></td><td>Role 0 = TX.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Role 1 unused.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Role 2 unused.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Role 3 unused.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Side unused.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x08</code></td><td>Bit 0 first, <code>xreload = 8</code>.</td></tr>
+        <tr><td><code>CMD_ADDR</code></td><td><code>0x00</code></td><td>Load address = <code>imem</code>.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x01</code></td><td>Word 0, low byte.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x20</code></td><td>Word 0 = <code>0x2001</code>, start bit.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x08</code></td><td>Word 1, low byte.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x30</code></td><td>Word 1 = <code>0x3008</code>, data bits.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Word 2, low byte.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x22</code></td><td>Word 2 = <code>0x2200</code>, stop bit.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Word 3, low byte.</td></tr>
+        <tr><td><code>CMD_WRITE</code></td><td><code>0x00</code></td><td>Word 3 = <code>0x0000</code>, halt.</td></tr>
+        <tr><td><code>CMD_PAYLOAD</code></td><td><code>0xA5</code></td><td>Output shift = <code>0xA5</code>.</td></tr>
+        <tr><td><code>CMD_PC</code></td><td><code>0x00</code></td><td><code>pc = 0</code>.</td></tr>
+        <tr><td><code>CMD_RUN</code></td><td><code>0x00</code></td><td><code>running = 1</code>. The frame begins on the next tick.</td></tr>
+      </tbody>
+    </table>
+    <p>The next byte on the same program is three ticks: the new payload, <code>pc = 0</code>, run. The twelve config bytes and the four instruction words stay.</p>
+
+    <h2>Opcodes</h2>
+    <p>Eight operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, and hold.</p>
+<pre>localparam [3:0] OP_HALT    = 4'h0;  // running = 0. Pins stay.
+localparam [3:0] OP_WAIT    = 4'h1;  // stall until role reads val
+localparam [3:0] OP_SET     = 4'h2;  // drive role to val, push-pull
+localparam [3:0] OP_SHIFT   = 4'h3;  // drive role to the next payload bit, push-pull
+localparam [3:0] OP_IN      = 4'h4;  // sample role into the input shift
+localparam [3:0] OP_OD      = 4'h5;  // pull or release role. val 0 pulls, val 1 releases
+localparam [3:0] OP_ODSHIFT = 4'h6;  // payload bit 0 pulls role, bit 1 releases it
+localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
+    <p><code>OP_SHIFT</code> and <code>OP_ODSHIFT</code> consume one bit of the output shift. The bit taken is the one <code>out_dir</code> names. <code>OP_IN</code> assembles bits in the order <code>in_dir</code> names.</p>
+    <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, and <code>OP_ODSHIFT</code>. The data pin and the side pin update together, then the hold runs. A pin the word does not write keeps its level.</p>
+
+    <h2>The 16-bit word</h2>
+    <p>One word is one run step. Bits the step does not use are written as 0.</p>
+    <table>
+      <thead>
+        <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>15:12</td><td><code>op</code></td><td>Which operation. The constants are above.</td></tr>
+        <tr><td>11:10</td><td><code>role</code></td><td>Which data pin, a number from 0 to 3. The load map binds the number to a physical pin.</td></tr>
+        <tr><td>9</td><td><code>val</code></td><td>For <code>OP_SET</code>, the level driven. For <code>OP_WAIT</code>, the level to wait for. For <code>OP_OD</code>, 0 pulls and 1 releases.</td></tr>
+        <tr><td>8</td><td><code>side</code></td><td>1 writes the side pin on this same tick. The side pin is chosen in the load map. SPI's side pin is SCK. I2C's side pin is SCL.</td></tr>
+        <tr><td>7</td><td><code>side_val</code></td><td>What is written to the side pin. Push-pull: the level. Open-drain: 0 pulls, 1 releases.</td></tr>
+        <tr><td>6:4</td><td><code>hold</code></td><td>Which wait to load after the pin update. The pins stay through that wait.</td></tr>
+        <tr><td>3</td><td><code>xdec</code></td><td>1 subtracts 1 from <code>x</code>. If <code>x</code> is still greater than 0, the next instruction is this address minus <code>back</code>. If <code>x</code> is 0, execution falls through.</td></tr>
+        <tr><td>2:1</td><td><code>back</code></td><td>How many instructions the loop jumps back. 0 means this same instruction. 1 means the previous one.</td></tr>
+        <tr><td>0</td><td><code>setx</code></td><td>1 loads <code>x</code> with <code>xreload</code>.</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <thead>
+        <tr><th><code>hold</code></th><th>Name</th><th>Ticks the pins stay</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>T</code></td><td>The UART bit time, from addresses <code>0x40</code> and <code>0x41</code>.</td></tr>
+        <tr><td>1</td><td><code>T/2</code></td><td>Half of <code>T</code>. Used to reach the middle of a UART bit. <code>T</code> has to be even.</td></tr>
+        <tr><td>2</td><td><code>Tlo</code></td><td>The low half of a clock this side generates, from <code>0x42</code> and <code>0x43</code>.</td></tr>
+        <tr><td>3</td><td><code>Thi</code></td><td>The high half, from <code>0x44</code> and <code>0x45</code>. SPI's fastest clock is <code>Tlo = Thi = 1</code>.</td></tr>
+        <tr><td>4</td><td><code>1</code></td><td>One tick. I2C uses it so a released clock is visible before the wait samples it.</td></tr>
+        <tr><td>5</td><td>none</td><td>No extra wait. The next instruction is the following tick.</td></tr>
+        <tr><td>6, 7</td><td></td><td>Reserved.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>How to read one word</h2>
+    <p>SPI's sample step is <code>0x49BA</code>.</p>
+<pre>0100 1001 1011 1010
+op   role val side side_val hold xdec back setx
+0100 10   0   1    1        011  1    01   0</pre>
+    <p>Opcode <code>0100</code> is <code>OP_IN</code>. Role <code>10</code> is MISO, role 2. <code>side</code> is 1 and <code>side_val</code> is 1, so SCK is driven high on that same tick. <code>hold</code> is <code>Thi</code>. <code>xdec</code> is 1 and <code>back</code> is 1, so while <code>x</code> is still above 0 the next instruction is the previous one, which is the <code>OP_SHIFT</code> that presents the next MOSI bit.</p>
+
+    <h2>What the set supports</h2>
+    <p>The four programs below are made of these moves.</p>
+    <table>
+      <thead>
+        <tr><th>Move</th><th>How</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Shift out</td><td><code>OP_SHIFT</code> on a push-pull pin, <code>OP_ODSHIFT</code> on an open-drain pin. Either bit order, from <code>out_dir</code>.</td></tr>
+        <tr><td>Shift in</td><td><code>OP_IN</code>, eight bits, in the order <code>in_dir</code> names.</td></tr>
+        <tr><td>Two pins on one tick</td><td>The data role, plus the side pin when <code>side</code> is 1. SPI's clock beside MOSI. I2C's clock beside SDA.</td></tr>
+        <tr><td>Six hold lengths</td><td><code>T</code>, <code>T/2</code>, <code>Tlo</code>, <code>Thi</code>, one tick, or none. <code>Tlo = Thi = 1</code> is a 25 MHz SPI clock.</td></tr>
+        <tr><td>A loop of N bits</td><td>One counter <code>x</code>. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> with <code>back</code> 0 to 3 jumps backward while <code>x</code> stays above 0.</td></tr>
+        <tr><td>Stall</td><td><code>OP_WAIT</code> until a role reads 0 or 1. UART start edge, I2C clock stretch.</td></tr>
+        <tr><td>Pull and release</td><td><code>OP_OD</code> and <code>OP_ODSHIFT</code>. A 0 in the payload pulls. A 1 releases.</td></tr>
+        <tr><td>Halt with the pins held</td><td><code>OP_HALT</code> clears <code>running</code> and leaves the last levels. A multi-byte I2C transfer continues from a later <code>pc</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>What it does not do:</p>
+    <table>
+      <thead>
+        <tr><th>Missing</th><th>Consequence</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>No unconditional or forward jump</td><td>A program is straight-line plus one backward loop. The host stitches segments by writing <code>pc</code>.</td></tr>
+        <tr><td>No branch on the bit just sampled</td><td>An I2C NACK or a bad UART stop bit is found by the host after halt, on <code>CMD_READ</code>.</td></tr>
+        <tr><td>Two pins per step, not three</td><td>JTAG's TCK, TMS, and TDI setup takes two ticks.</td></tr>
+        <tr><td>One byte per shift register, no FIFO</td><td>One run moves at most one byte out and one byte in. The next byte is another load of the payload.</td></tr>
+        <tr><td>One counter</td><td>No nested loops.</td></tr>
+        <tr><td><code>hold</code> codes 6 and 7</td><td>Reserved.</td></tr>
+      </tbody>
+    </table>
+    <p>The four programs together are 31 words, so they fit in the 32-word memory if they are loaded at once. They can also replace each other: the host rewrites <code>imem</code> and the config bytes when the protocol changes.</p>
+
+    <h2>UART sender</h2>
+    <p>Role 0 is TX, push-pull. No side pin. Shift bit 0 first. <code>T</code> is the bit time. Four words. The loop is one <code>OP_SHIFT</code> that jumps to itself.</p>
+    <table>
+      <thead>
+        <tr><th>Address</th><th>Word</th><th>Instruction</th><th>What the pin does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>0x2001</code></td><td><code>OP_SET</code> TX, 0, hold <code>T</code>, <code>setx</code></td><td>Start bit. <code>x = xreload</code>, which is 8.</td></tr>
+        <tr><td>1</td><td><code>0x3008</code></td><td><code>OP_SHIFT</code> TX, hold <code>T</code>, <code>xdec</code>, <code>back</code> 0</td><td>Next data bit, least significant first. Repeats while <code>x</code> stays above 0.</td></tr>
+        <tr><td>2</td><td><code>0x2200</code></td><td><code>OP_SET</code> TX, 1, hold <code>T</code></td><td>Stop bit.</td></tr>
+        <tr><td>3</td><td><code>0x0000</code></td><td><code>OP_HALT</code></td><td>TX stays 1. The host may write the next byte.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>UART receiver</h2>
+    <p>A second program. Role 0 is RX, an input. The first sample becomes bit 0. The <code>OP_WAIT</code> tick is the start edge. The two holds after it are the rest of the start bit and half of bit 0. The stop bit is a second <code>OP_WAIT</code>, for 1. Sampling it with <code>OP_IN</code> would shift bit 0 out of the 8-bit input register. A stop level of 0 stalls on that instruction. After halt, <code>CMD_READ</code> presents the assembled byte.</p>
+    <table>
+      <thead>
+        <tr><th>Address</th><th>Word</th><th>Instruction</th><th>What the pin does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>0x1050</code></td><td><code>OP_WAIT</code> RX, 0, no hold</td><td>Stall until RX falls.</td></tr>
+        <tr><td>1</td><td><code>0x7000</code></td><td><code>OP_HOLD</code> <code>T</code></td><td>Rest of the start bit. RX is not driven.</td></tr>
+        <tr><td>2</td><td><code>0x7011</code></td><td><code>OP_HOLD</code> <code>T/2</code>, <code>setx</code></td><td>Land in the middle of bit 0. <code>x = 8</code>.</td></tr>
+        <tr><td>3</td><td><code>0x4008</code></td><td><code>OP_IN</code> RX, hold <code>T</code>, <code>xdec</code>, <code>back</code> 0</td><td>Sample a data bit, then wait one bit time. Eight times.</td></tr>
+        <tr><td>4</td><td><code>0x1250</code></td><td><code>OP_WAIT</code> RX, 1, no hold</td><td>Stop bit. A 0 stalls here, so the eight data samples stay in the input shift for <code>CMD_READ</code>.</td></tr>
+        <tr><td>5</td><td><code>0x0000</code></td><td><code>OP_HALT</code></td><td>The input shift holds the byte for the host to read.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>SPI master</h2>
+    <p>One program, mode 0. Role 0 is MOSI, role 1 is CS, role 2 is MISO. The side pin is SCK, push-pull, idle 0. Shift bit 7 first, out and in. CS is its own instruction, so the bit step writes two pins: MOSI and SCK, or MISO's sample and SCK.</p>
+    <table>
+      <thead>
+        <tr><th>Address</th><th>Word</th><th>Instruction</th><th>What the pins do</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>0x2421</code></td><td><code>OP_SET</code> CS, 0, hold <code>Tlo</code>, <code>setx</code></td><td>Select the device. <code>x = 8</code>.</td></tr>
+        <tr><td>1</td><td><code>0x3120</code></td><td><code>OP_SHIFT</code> MOSI, side SCK 0, hold <code>Tlo</code></td><td>Next data bit, clock held low.</td></tr>
+        <tr><td>2</td><td><code>0x49BA</code></td><td><code>OP_IN</code> MISO, side SCK 1, hold <code>Thi</code>, <code>xdec</code>, <code>back</code> 1</td><td>Clock rises and MISO is sampled on that tick. Then back to address 1.</td></tr>
+        <tr><td>3</td><td><code>0x2620</code></td><td><code>OP_SET</code> CS, 1, hold <code>Tlo</code></td><td>Release the device.</td></tr>
+        <tr><td>4</td><td><code>0x0000</code></td><td><code>OP_HALT</code></td><td>The input shift holds the byte that came in on MISO.</td></tr>
+      </tbody>
+    </table>
+    <p>More than one slave is still on this ASIC. SCK, MOSI, and MISO stay shared. Each slave gets its own chip-select pin on this die. No off-chip CS demux is assumed. Role 1 is CS0 in the listing above. Role 3 is free for a second CS the program can <code>OP_SET</code>. Every further slave uses another <code>uo</code> or <code>uio</code> pin: the host drives that CS low before <code>CMD_RUN</code> and high after halt. Only one CS is low at a time. <code>ui</code> cannot be a CS. The bit loop is unchanged; the slave count is the leftover output pins after the three shared wires are placed.</p>
+
+    <h2>I2C master</h2>
+    <p>One program. Role 0 is SDA and role 1 is SCL, both open-drain. The side pin is SCL, so a data bit and the clock can change together. <code>side_val</code> 0 pulls SCL, and 1 releases it. The payload is the address byte, bit 7 first. Sixteen words. All four programs on this page are 31 words, which fills 32 slots of 16 bits minus one.</p>
+    <table>
+      <thead>
+        <tr><th>Address</th><th>Word</th><th>Instruction</th><th>What the pins do</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>0x51A0</code></td><td><code>OP_OD</code> SDA pull, side SCL release, hold <code>Tlo</code></td><td>Start. SDA falls while SCL stays released.</td></tr>
+        <tr><td>1</td><td><code>0x5421</code></td><td><code>OP_OD</code> SCL pull, hold <code>Tlo</code>, <code>setx</code></td><td>Clock low before the first bit. <code>x = 8</code>.</td></tr>
+        <tr><td>2</td><td><code>0x6120</code></td><td><code>OP_ODSHIFT</code> SDA, side SCL pull, hold <code>Tlo</code></td><td>Next bit, as a pull or a release, while SCL is low.</td></tr>
+        <tr><td>3</td><td><code>0x5640</code></td><td><code>OP_OD</code> SCL release, hold 1</td><td>Let the clock rise.</td></tr>
+        <tr><td>4</td><td><code>0x1650</code></td><td><code>OP_WAIT</code> SCL, 1, no hold</td><td>Stay here while the other chip holds SCL low.</td></tr>
+        <tr><td>5</td><td><code>0x403E</code></td><td><code>OP_IN</code> SDA, hold <code>Thi</code>, <code>xdec</code>, <code>back</code> 3</td><td>Clock is high. Then back to address 2, eight times.</td></tr>
+        <tr><td>6</td><td><code>0x5320</code></td><td><code>OP_OD</code> SDA release, side SCL pull, hold <code>Tlo</code></td><td>Acknowledgement. We let go of SDA, clock low.</td></tr>
+        <tr><td>7</td><td><code>0x5640</code></td><td><code>OP_OD</code> SCL release, hold 1</td><td>Let the clock rise for the acknowledgement.</td></tr>
+        <tr><td>8</td><td><code>0x1650</code></td><td><code>OP_WAIT</code> SCL, 1, no hold</td><td>Stretch, again.</td></tr>
+        <tr><td>9</td><td><code>0x4030</code></td><td><code>OP_IN</code> SDA, hold <code>Thi</code></td><td>0 means the other chip acknowledged. The host sees that bit on <code>CMD_READ</code>.</td></tr>
+        <tr><td>10</td><td><code>0x5421</code></td><td><code>OP_OD</code> SCL pull, hold <code>Tlo</code>, <code>setx</code></td><td>Clock low again. <code>x = 8</code>, because the bit loop left it at 0. The next byte can start at address 2.</td></tr>
+        <tr><td>11</td><td><code>0x5120</code></td><td><code>OP_OD</code> SDA pull, side SCL pull, hold <code>Tlo</code></td><td>Stop begins with both wires low.</td></tr>
+        <tr><td>12</td><td><code>0x5640</code></td><td><code>OP_OD</code> SCL release, hold 1</td><td>SCL rises first.</td></tr>
+        <tr><td>13</td><td><code>0x1650</code></td><td><code>OP_WAIT</code> SCL, 1, no hold</td><td>Wait until SCL really reads 1.</td></tr>
+        <tr><td>14</td><td><code>0x53B0</code></td><td><code>OP_OD</code> SDA release, side SCL release, hold <code>Thi</code></td><td>SDA rises while SCL is released. That is the stop.</td></tr>
+        <tr><td>15</td><td><code>0x0000</code></td><td><code>OP_HALT</code></td><td>Both wires stay released, which is idle.</td></tr>
+      </tbody>
+    </table>
+    <p>A second data byte repeats addresses 2 through 10. Halting after address 10 leaves SCL pulled, which holds the bus. Address 10 also reloads <code>x</code>, because the bit loop leaves it at 0. The host writes the next payload, sets the program counter to 2, and runs. Address 11, the stop, runs after the last byte.</p>
+
+    <h2>Why 16 bits, not 8</h2>
+    <p>The fields above add up to 16. Four are the opcode. The other twelve are what one SPI or I2C step has to say at once: which data pin, the level or the pull, whether the clock pin changes on that same tick, which wait to load, and whether the loop repeats.</p>
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Bits</th><th>Why it is in the word</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>op</code></td><td>4</td><td>Eight operations. Three bits would also cover eight operations.</td></tr>
+        <tr><td><code>role</code></td><td>2</td><td>SPI touches MOSI, CS, and MISO. One configured data pin cannot name all three.</td></tr>
+        <tr><td><code>val</code></td><td>1</td><td>The driven level, the level to wait for, or pull versus release.</td></tr>
+        <tr><td><code>side</code>, <code>side_val</code></td><td>2</td><td>The clock beside the data. At one tick low and one tick high, this cannot be a later instruction.</td></tr>
+        <tr><td><code>hold</code></td><td>3</td><td>UART uses <code>T</code> and <code>T/2</code>. I2C uses <code>Tlo</code>, <code>Thi</code>, one tick, and no wait. One program needs more than one length.</td></tr>
+        <tr><td><code>xdec</code>, <code>back</code>, <code>setx</code></td><td>4</td><td>Eight data bits from one instruction. UART jumps to itself, SPI jumps back one, I2C jumps back three.</td></tr>
+      </tbody>
+    </table>
+    <p>That is 4 + 12. Dropping the opcode to 3 bits and storing the loop target in a register instead of <code>back</code> still leaves about 12 bits. Twelve does not fit in a byte. Eight bits is the UART transmitter only: one pin, one hold length, and the eight shifts written out as eight bytes.</p>
+    <p><code>uio[7:0]</code> stays 8 bits. Those pins are the load bus, used while the machine is stopped. A 16-bit wait and a 16-bit instruction both arrive as two bytes, low then high. During the run the word is read from instruction memory, not from the pins, and <code>uio</code> can be a protocol wire.</p>
+  </main>
+</body>
+</html>

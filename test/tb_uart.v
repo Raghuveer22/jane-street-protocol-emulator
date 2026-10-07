@@ -4,7 +4,7 @@
 /*
  * Self-checking bench for the UART 8N1 program on pin_engine.
  *
- * The programs live in prog/*.asm. This file loads the assembled bytes
+ * The programs live in prog/. This file loads the assembled words
  * through the Tiny Tapeout pins and checks tx/busy every clock.
  *
  * Sampling matches the engine: RUN's clock is still idle, and the first
@@ -16,13 +16,15 @@
 
 module tb_uart;
 
-  localparam [2:0] CMD_PERIOD_LO = 3'd0;
-  localparam [2:0] CMD_PERIOD_HI = 3'd1;
-  localparam [2:0] CMD_SHIFT     = 3'd2;
-  localparam [2:0] CMD_ADDR      = 3'd3;
-  localparam [2:0] CMD_IMEM      = 3'd4;
-  localparam [2:0] CMD_PC        = 3'd5;
-  localparam [2:0] CMD_RUN       = 3'd6;
+  localparam [2:0] CMD_ADDR    = 3'd0;
+  localparam [2:0] CMD_WRITE   = 3'd1;
+  localparam [2:0] CMD_PAYLOAD = 3'd2;
+  localparam [2:0] CMD_PC      = 3'd3;
+  localparam [2:0] CMD_RUN     = 3'd4;
+
+  // Role 0 = TX on uo[0], push-pull, idle 1. Bit 0 first, xreload = 8.
+  localparam [7:0] TX_BIND = 8'h68;
+  localparam [7:0] LSB8    = 8'h08;
 
   reg        clk;
   reg        rst_n;
@@ -34,7 +36,7 @@ module tb_uart;
   wire [7:0] uio_oe;
 
   wire tx   = uo_out[0];
-  wire busy = uo_out[1];
+  wire busy = uo_out[7];
 
   tt_um_posamokshith_proto dut (
       .ui_in  (ui_in),
@@ -47,9 +49,9 @@ module tb_uart;
       .rst_n  (rst_n)
   );
 
-  reg [7:0] prog_shift [0:15];
-  reg [7:0] prog_nop   [0:15];
-  reg [7:0] prog_set   [0:15];
+  reg [15:0] prog_shift [0:31];
+  reg [15:0] prog_nop   [0:31];
+  reg [15:0] prog_set   [0:31];
 
   integer cycle;
   integer passes;
@@ -61,7 +63,6 @@ module tb_uart;
   integer bi;
   integer si;
   integer k;
-  reg [7:0] byte_i;
   reg exp;
 
   initial clk = 1'b0;
@@ -107,33 +108,44 @@ module tb_uart;
   task program_period;
     input integer period;
     begin
-      write(CMD_PERIOD_LO, period & 255);
-      write(CMD_PERIOD_HI, (period >> 8) & 255);
+      write(CMD_ADDR, 8'h40);
+      write(CMD_WRITE, period & 255);
+      write(CMD_WRITE, (period >> 8) & 255);
     end
   endtask
 
   // which: 0 shift program, 1 nop program, 2 unrolled SETs.
-  // Address 0x10 must wrap to imem[0]. A program that lands elsewhere
-  // halts immediately and the following frame check fails.
+  // Words are 16 bits, low byte then high byte. The UART binding is reloaded
+  // with the program because reset clears it.
   task load_prog;
     input integer which;
+    reg [15:0] word_i;
     begin
-      write(CMD_ADDR, 8'h10);
-      for (li = 0; li < 16; li = li + 1) begin
+      write(CMD_ADDR, 8'h00);
+      for (li = 0; li < 32; li = li + 1) begin
         if (which == 0)
-          byte_i = prog_shift[li];
+          word_i = prog_shift[li];
         else if (which == 1)
-          byte_i = prog_nop[li];
+          word_i = prog_nop[li];
         else
-          byte_i = prog_set[li];
-        write(CMD_IMEM, byte_i);
+          word_i = prog_set[li];
+        write(CMD_WRITE, word_i[7:0]);
+        write(CMD_WRITE, word_i[15:8]);
       end
+      write(CMD_ADDR, 8'h46);
+      write(CMD_WRITE, TX_BIND);
+      write(CMD_WRITE, 8'h00);
+      write(CMD_WRITE, 8'h00);
+      write(CMD_WRITE, 8'h00);
+      write(CMD_WRITE, 8'h00);
+      write(CMD_WRITE, LSB8);
     end
   endtask
 
   task check_pins;
     begin
-      if (uo_out[7:2] !== 6'b0 || uio_oe !== 8'h00 || uio_out !== 8'h00) begin
+      // uo[0] is TX. uo[7] is running. The other outputs stay low.
+      if (uo_out[6:1] !== 6'b0 || uio_oe !== 8'h00 || uio_out !== 8'h00) begin
         $display("FAIL unused pins uo %02h uio_out %02h uio_oe %02h cycle %0d",
                  uo_out, uio_out, uio_oe, cycle);
         $finish(1);
@@ -153,7 +165,7 @@ module tb_uart;
         $finish(1);
       end
       if (shift_en)
-        write(CMD_SHIFT, data);
+        write(CMD_PAYLOAD, data);
       write(CMD_PC, pc_val & 255);
       write(CMD_RUN, 8'h00);
       // This is the clock that accepted RUN. The pin is still idle.
@@ -167,10 +179,10 @@ module tb_uart;
         exp = exp_bit(data, bi);
         for (si = 0; si < hold; si = si + 1) begin
           if (poison_en && bi == 0 && si == 1) begin
-            ui_in  = {4'b0, CMD_SHIFT, 1'b1};
+            ui_in  = {4'b0, CMD_PAYLOAD, 1'b1};
             uio_in = 8'hFF;
           end else if (poison_en && bi == 1 && si == 0) begin
-            ui_in  = {4'b0, CMD_PERIOD_LO, 1'b1};
+            ui_in  = {4'b0, CMD_WRITE, 1'b1};
             uio_in = 8'h01;
           end else if (poison_en && bi == 2 && si == 0) begin
             ui_in  = {4'b0, CMD_PC, 1'b1};
@@ -250,23 +262,23 @@ module tb_uart;
     ena       = 1'b1;
     rst_n     = 1'b0;
 
-    for (li = 0; li < 16; li = li + 1) begin
-      prog_shift[li] = 8'h00;
-      prog_nop[li]   = 8'h00;
-      prog_set[li]   = 8'h00;
+    for (li = 0; li < 32; li = li + 1) begin
+      prog_shift[li] = 16'h0000;
+      prog_nop[li]   = 16'h0000;
+      prog_set[li]   = 16'h0000;
     end
     $readmemh("sim_build/uart_8n1.hex", prog_shift);
     $readmemh("sim_build/uart_8n1_nop.hex", prog_nop);
     $readmemh("sim_build/uart_a5_unrolled.hex", prog_set);
-    if (prog_shift[0] !== 8'h20 || prog_shift[1] !== 8'h30 || prog_shift[10] !== 8'h00) begin
+    if (prog_shift[0] !== 16'h2001 || prog_shift[1] !== 16'h3008 || prog_shift[3] !== 16'h0000) begin
       $display("FAIL sim_build/uart_8n1.hex did not load (run from test/)");
       $finish(1);
     end
-    if (prog_nop[10] !== 8'h10 || prog_nop[11] !== 8'h00) begin
+    if (prog_nop[3] !== 16'h7050 || prog_nop[4] !== 16'h0000) begin
       $display("FAIL sim_build/uart_8n1_nop.hex did not load");
       $finish(1);
     end
-    if (prog_set[0] !== 8'h20 || prog_set[1] !== 8'h21 || prog_set[10] !== 8'h00) begin
+    if (prog_set[0] !== 16'h2000 || prog_set[1] !== 16'h2200 || prog_set[10] !== 16'h0000) begin
       $display("FAIL sim_build/uart_a5_unrolled.hex did not load");
       $finish(1);
     end
@@ -341,7 +353,7 @@ module tb_uart;
     pass;
 
     $display("TEST RUN with pc left on HALT sends nothing");
-    write(CMD_SHIFT, 8'hFF);
+    write(CMD_PAYLOAD, 8'hFF);
     write(CMD_RUN, 8'h00);
     if (busy !== 1'b1 || tx !== 1'b1) begin
       $display("FAIL RUN clock busy %b tx %b", busy, tx);
@@ -355,8 +367,8 @@ module tb_uart;
     end
     pass;
 
-    $display("TEST pc 0x10 starts at 0");
-    pc_val = 8'h10;
+    $display("TEST pc uses five bits, so 0x20 starts at 0");
+    pc_val = 8'h20;
     check_frame(8'hA5, 4);
     pass;
 
@@ -391,7 +403,8 @@ module tb_uart;
     pass;
 
     $display("TEST high byte sticks, period 0x0104");
-    write(CMD_PERIOD_LO, 8'h04);
+    write(CMD_ADDR, 8'h40);
+    write(CMD_WRITE, 8'h04);
     frame(8'h01, 16'h0104);
     pass;
 
@@ -426,7 +439,7 @@ module tb_uart;
     $display("TEST SET-only program sends 0xA5");
     load_prog(2);
     program_period(4);
-    write(CMD_SHIFT, 8'h00);
+    write(CMD_PAYLOAD, 8'h00);
     // SHIFT stays 0x00. The 0xA5 waveform has to come from the SET instructions.
     shift_en = 0;
     check_frame(8'hA5, 4);
@@ -435,7 +448,7 @@ module tb_uart;
     $display("TEST reset mid-frame returns to idle HALT");
     load_prog(0);
     program_period(4);
-    write(CMD_SHIFT, 8'hA5);
+    write(CMD_PAYLOAD, 8'hA5);
     write(CMD_PC, 8'h00);
     write(CMD_RUN, 8'h00);
     @(posedge clk);

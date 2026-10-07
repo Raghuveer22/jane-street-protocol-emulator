@@ -25,15 +25,11 @@ Stretch: low-speed USB, 10 Mbit Ethernet. Also worth considering: JTAG, SWD, PS/
 
 Jane Street may raise the cap to 8×4 tiles. Stay on 6×4 until they say otherwise.
 
-This folder is the [Tiny Tapeout CMOS5L Verilog template](https://github.com/TinyTapeout/ttihp-verilog-template), with the pin engine filled in. First milestone from the announcement: a UART transmitter on a pin, then make that transmitter programmable.
+This folder is the [Tiny Tapeout CMOS5L Verilog template](https://github.com/TinyTapeout/ttihp-verilog-template), with the pin engine filled in.
 
 ## Where the RTL is
 
-`src/pin_engine.v` is a 16-word program memory and one timed pin. UART 8N1 is firmware:
-
-`SET 0`, eight `SHIFT`s (LSB first), `SET 1`, `HALT`.
-
-Each `SET` or `SHIFT` holds the pin for `period` clocks, so baud is `clock / period`. A second program that only toggles the pin is in the test, to keep this from turning into a fixed UART block. The top `tt_um_posamokshith_proto` is the Tiny Tapeout pinout (`info.yaml`, 6×4 tiles).
+`src/pin_engine.v` is a 32-word, 16-bit program memory. UART transmit, UART receive, SPI mode 0, and I2C master are programs in `prog/`, not Verilog blocks. The host loads them through six commands while the machine is stopped. `uo[7]` is `running`. A toggle program in the test keeps this from turning into a fixed UART block. The top `tt_um_posamokshith_proto` is the Tiny Tapeout pinout (`info.yaml`, 6×4 tiles).
 
 Install the template's test tools, then run the suite. `test/tb.v` wraps the top, which is what `.github/workflows/test.yaml` runs:
 
@@ -44,8 +40,6 @@ cd test && make -B
 
 `src/config.json` is the template OpenLane config (50 MHz). `.github/workflows/` is the template's test, GDS, docs, and FPGA actions. They run on push because this repository root is the Tiny Tapeout project.
 
-The problem is `docs/info.md`. The instruction encodings and host command map for the current program are in `docs/pin_engine.md`.
-
-Next: sample an input pin and branch, so SPI and I2C can be programs on the same engine.
+The problem is `docs/info.md`. The instruction word and the host command map are in `docs/instruction_definition.html`. How the engine applies them is `docs/pin_engine.md`.
 
 Questions: asic-competition@janestreet.com

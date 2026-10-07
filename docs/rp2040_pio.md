@@ -113,6 +113,6 @@ Start and stop are not separate opcodes. The core pushes raw instructions throug
 
 ## What is different from the chip in this repository
 
-`src/pin_engine.v` is the transmit half of the UART program and nothing else. One pin, `SET` and `SHIFT`, a `period` counter standing in for PIO's delay field. There is no `WAIT`, no `IN`, no side-set, and no second pin, so the receive program, the two-line SPI program, and the I2C direction trick have nowhere to run.
+`src/pin_engine.v` is the same idea with the fields this chip can afford: `WAIT`, `IN`, a side pin, and open-drain pull or release, plus the `T` / `Tlo` / `Thi` holds that stand in for PIO's delay field. UART receive, SPI, and I2C are programs in `prog/`.
 
 PIO can do all three because the instruction set can read a pin, write an extra pin on the same instruction, and branch. The ARM cores are outside that instruction set. They own the FIFOs and they choose which of the 32 slots to start. On the ASIC there is no second processor on the die. The host writes the program through the pins, and the instruction set is the whole chip.

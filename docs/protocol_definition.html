@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protocol definition</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f3;
+      --fg: #1c1917;
+      --muted: #57534e;
+      --card: #ffffff;
+      --line: #e7e5e4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917;
+        --fg: #fafaf9;
+        --muted: #a8a29e;
+        --card: #292524;
+        --line: #44403c;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 17px/1.55 ui-sans-serif, system-ui, sans-serif;
+    }
+    main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.2rem; font-weight: 600; margin: 2.2rem 0 0.6rem; }
+    p { margin: 0.7rem 0; }
+    .note { color: var(--muted); }
+    .katex-display { margin: 1rem 0; overflow-x: auto; overflow-y: hidden; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0 0; font-size: 0.92rem; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 0.45rem 0.5rem 0.45rem 0; vertical-align: top; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Protocol definition</h1>
+    <p class="note">The formulas from the Definition section of <code>docs/protocol_model.md</code>. This page needs a network connection the first time, so the browser can load KaTeX.</p>
+
+    <h2>Clock and pins</h2>
+    <p>Time is the tick index \(t \in \mathbb{N}\). The shuttle fixes the clock and the tick length:</p>
+    $$f = 5 \times 10^{7}\ \mathrm{Hz}, \qquad \tau = 1/f = 20\ \mathrm{ns}.$$
+    <p>Tick \(t\) is the physical instant \(t\tau\).</p>
+    <p>The pins are three copies of \(\{0,\ldots,7\}\):</p>
+    $$U_I \text{ inputs}, \qquad U_O \text{ outputs}, \qquad U_B \text{ bidirectional}.$$
+    <p>At tick \(t\) the chip applies an action and observes a sample:</p>
+    $$
+    \begin{aligned}
+    a(t) &= \big(y_O(t),\, e(t),\, y_B(t)\big), &
+    y_O(t), e(t), y_B(t) &\in \{0,1\}^8, \\
+    x(t) &= \big(x_I(t),\, x_B(t)\big), &
+    x_I(t), x_B(t) &\in \{0,1\}^8.
+    \end{aligned}
+    $$
+    <p>\(a(t)\) is what the chip drives at tick \(t\). \(x(t)\) is what it reads on that same tick. \(\{0,1\}^8\) means each piece is eight bits, one bit per pin of that bank.</p>
+    <table>
+      <thead>
+        <tr><th>Symbol</th><th>Verilog</th><th>What the bit is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>\(y_O(t)\)</td><td><code>uo_out[7:0]</code></td><td>Level forced onto each dedicated output. Bit \(i\) of \(y_O\) is <code>uo_out[i]</code>.</td></tr>
+        <tr><td>\(e(t)\)</td><td><code>uio_oe[7:0]</code></td><td>Output enable for each bidirectional pin. \(e_i = 1\) means this chip is driving pin \(i\). \(e_i = 0\) means it lets go.</td></tr>
+        <tr><td>\(y_B(t)\)</td><td><code>uio_out[7:0]</code></td><td>Level written onto a bidirectional pin, and only while the matching bit of \(e\) is 1.</td></tr>
+        <tr><td>\(x_I(t)\)</td><td><code>ui_in[7:0]</code></td><td>Dedicated inputs. The chip reads these and cannot drive them.</td></tr>
+        <tr><td>\(x_B(t)\)</td><td><code>uio_in[7:0]</code></td><td>The bidirectional wire after this chip and every other chip on it have pulled or released.</td></tr>
+      </tbody>
+    </table>
+    <p>On bidirectional pin \(i\): \(e_i = 1\) and \(y_{B,i} = 0\) pulls the wire to 0, \(e_i = 1\) and \(y_{B,i} = 1\) drives a strong 1, and \(e_i = 0\) releases the wire so \(y_{B,i}\) is ignored. That release is how an open-drain protocol writes a 1. \(x_B\) can disagree with \(y_B\), because another chip may be pulling the wire. That disagreement is an I2C acknowledgement.</p>
+    <p>\(y_O\) is driven onto \(U_O\) on every tick. On bidirectional pin \(i\), the enable selects the local driver:</p>
+    $$
+    d_i(t) =
+    \begin{cases}
+    y_{B,i}(t) & \text{if } e_i(t) = 1, \\
+    Z & \text{if } e_i(t) = 0.
+    \end{cases}
+    $$
+    <p>A released pin does not force the wire. With a pull-up, the sampled value is 0 when this chip or any other chip is pulling low:</p>
+    $$
+    x_{B,i}(t) = \lnot \big( \mathrm{me\_pull\_low}_i(t) \lor \mathrm{them\_pull\_low}_i(t) \big),
+    $$
+    $$
+    \mathrm{me\_pull\_low}_i(t) = e_i(t) \land \lnot y_{B,i}(t).
+    $$
+
+    <h2>A protocol</h2>
+    <p>A protocol is a tuple that satisfies the five constraints below.</p>
+    $$\Pi = (W,\ \iota,\ \mu,\ \sigma,\ \mathrm{Enc})$$
+    <p>\(W\) is the set of roles. Placement is injective, so the roles occupy distinct pins:</p>
+    $$\iota : W \hookrightarrow U_I \cup U_O \cup U_B$$
+    $$|W| \le |U_I| + |U_O| + |U_B| = 24. \tag{C1}$$
+    <p>The drive map \(\mu : W \to \{\mathrm{in}, \mathrm{push}, \mathrm{od}\}\):</p>
+    $$
+    \begin{aligned}
+    \mu(w) = \mathrm{in} &\implies \text{the program only reads } x, \\
+    \mu(w) = \mathrm{push} &\implies \text{the program holds a level in } \{0,1\}, \\
+    \mu(w) = \mathrm{od} &\implies \text{the program sets } \mathrm{me\_pull\_low} \text{ and may read } x \text{ back}.
+    \end{aligned}
+    $$
+    <p>Constraint C2: a push-pull role on \(U_B\) keeps \(e = 1\) for the whole frame. An open-drain role only pulls or releases.</p>
+
+    <h2>Synchronizer</h2>
+    <p>\(y_w(t)\) is the level of role \(w\) at tick \(t\).</p>
+    <p><strong>Clock I generate.</strong> Some \(c \in W\) has \(\mu(c) = \mathrm{push}\). Bit \(k\) runs from the \(k\)-th rising edge of \(c\) to the next one.</p>
+    $$T_{\mathrm{clk}} \ge 2, \qquad f_{\mathrm{clk}} = f / T_{\mathrm{clk}} \le f/2 = 25\ \mathrm{MHz}. \tag{C3}$$
+    <p><strong>Clock they generate.</strong> Bit \(k\) starts at an edge of an input role. Between edges the program holds.</p>
+    <p><strong>No clock wire.</strong> A start condition is true at tick \(t_0\). For UART, \(y(t_0-1) = 1\) and \(y(t_0) = 0\). Bit \(k\) occupies</p>
+    $$\big[t_0 + kT,\ t_0 + (k+1)T\big), \qquad T \in \mathbb{N},\ T \ge 1. \tag{C4}$$
+    <p>An NRZ bit \(s_k \in \{0,1\}\) is constant on that interval:</p>
+    $$\forall t \in \big[t_0 + kT,\ t_0 + (k+1)T\big) :\quad y(t) = s_k.$$
+    <p>The rate an integer \(T\) produces, and the error against a named rate \(r\):</p>
+    $$\hat r(T) = f / T, \qquad \varepsilon(T, r) = \left| \frac{f}{r\, T} - 1 \right|.$$
+    <p>\(T\) is exact when \(r\) divides \(f\). A mid-bit transition needs equal halves, so</p>
+    $$T \text{ is even}. \tag{C5}$$
+    <p>For an 8N1 byte \(b = b_7 \ldots b_0\), least significant bit first:</p>
+    $$\mathrm{Enc}(b) = (0,\ b_0,\ b_1,\ b_2,\ b_3,\ b_4,\ b_5,\ b_6,\ b_7,\ 1).$$
+    <p>The frame occupies \(10T\) ticks after \(t_0\).</p>
+
+    <h2>Realizable trace</h2>
+    <p>One tick, one step. State \(q(t)\), sample \(x(t)\), action \(a(t)\):</p>
+    $$q(t+1) = \delta_\rho\big(q(t), x(t)\big), \qquad a(t) = \lambda\big(q(t)\big).$$
+    <p>A hold step, when \(\mathrm{wait}(q) &gt; 0\):</p>
+    $$\lambda(q)_{\mathrm{pins}} = \lambda(q')_{\mathrm{pins}}, \qquad \mathrm{wait}(q') = \mathrm{wait}(q) - 1.$$
+    <p>The program is fixed while running, and a host write lands only when the machine is stopped:</p>
+    $$\mathrm{running}(t) = 1 \implies \rho(t) = \rho(0).$$
+    <p>On this engine a <code>SET</code> or <code>SHIFT</code> loads</p>
+    $$\mathrm{wait\_left} \leftarrow \max(\mathrm{period}, 1) - 1,$$
+    <p>so the level lasts</p>
+    $$T = \max(\mathrm{period}, 1) \qquad \text{and} \qquad \hat r(T) = f / T.$$
+
+    <h2>Checked rates</h2>
+    <table>
+      <thead>
+        <tr><th>Target \(r\)</th><th>\(T\)</th><th>\(\hat r(T)\)</th><th>\(\varepsilon\)</th><th>Constraint</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>9600 baud</td><td>5208</td><td>\(50\times 10^{6}/5208 \approx 9601\)</td><td>\(0.006\%\)</td><td>C4</td></tr>
+        <tr><td>115200 baud</td><td>434</td><td>\(50\times 10^{6}/434 \approx 115207\)</td><td>\(0.006\%\)</td><td>C4</td></tr>
+        <tr><td>I2C 100 kHz</td><td>500 per SCL</td><td>100 kHz</td><td>0</td><td>250 + 250 ticks</td></tr>
+        <tr><td>I2C 400 kHz</td><td>125 per SCL</td><td>400 kHz</td><td>0 on the period</td><td>halves are 62 and 63</td></tr>
+        <tr><td>SPI</td><td>\(T_{\mathrm{clk}} = 2\)</td><td>25 MHz</td><td>0</td><td>C3</td></tr>
+        <tr><td>USB 1.5 Mbit/s</td><td>33</td><td>\(\approx 1.515\times 10^{6}\)</td><td>\(1.01\%\)</td><td>\(f/r = 100/3\)</td></tr>
+        <tr><td>USB 1.5 Mbit/s</td><td>34</td><td>\(\approx 1.471\times 10^{6}\)</td><td>\(1.96\%\)</td><td>past \(\pm 1.5\%\)</td></tr>
+        <tr><td>USB 12 Mbit/s</td><td>4 or 5</td><td>12.5 or 10 Mbit/s</td><td>\(4.2\%\) or \(17\%\)</td><td>no exact \(T\)</td></tr>
+        <tr><td>Ethernet 10 Mbit/s</td><td>5</td><td>10 Mbit/s</td><td>0</td><td>C5 fails, \(T\) odd</td></tr>
+      </tbody>
+    </table>
+  </main>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      renderMathInElement(document.body, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\(", right: "\\)", display: false }
+        ],
+        throwOnError: false
+      });
+    });
+  </script>
+</body>
+</html>

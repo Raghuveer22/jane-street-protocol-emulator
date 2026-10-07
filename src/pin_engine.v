@@ -1,15 +1,22 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * Programmable pin engine. UART is a program loaded into imem, not a
- * fixed peripheral. Each SET or SHIFT holds the pin for `period` clocks.
+ * Programmable pin engine. UART, SPI, and I2C are programs in imem.
+ * The 16-bit word, the load map, and those programs are documented in
+ * docs/instruction_definition.html.
  *
- *   0x00      HALT
- *   0x20/0x21 SET tx to 0 or 1, hold for `period` clocks
- *   0x30      SHIFT tx = shift[0], then shift right, hold for `period` clocks
+ *   OP_HALT    0x0  running = 0. Pins stay.
+ *   OP_WAIT    0x1  stall until role reads val
+ *   OP_SET     0x2  drive role to val, push-pull
+ *   OP_SHIFT   0x3  drive role to the next payload bit, push-pull
+ *   OP_IN      0x4  sample role into the input shift
+ *   OP_OD      0x5  pull or release role. val 0 pulls, val 1 releases
+ *   OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
+ *   OP_HOLD    0x7  change no pin, only load the wait
  *
- * Host writes are ignored while a program is running. Execution of imem[pc]
- * begins on the clock after RUN is accepted. A period of 0 holds for 1 clock.
+ * Host writes are ignored while a program is running. The instruction at
+ * pc runs on the clock after CMD_RUN. A hold length of 0 is a hold of 1.
+ * uo[7] is `running`, so pin 15 is not a protocol pin.
  */
 
 `timescale 1ns/1ps
@@ -18,68 +25,290 @@
 module pin_engine (
     input  wire       clk,
     input  wire       rst_n,
-    input  wire       wr,
-    input  wire [2:0] cmd,
-    input  wire [7:0] wdata,
-    output wire       tx,
-    output wire       busy
+    input  wire [7:0] ui,
+    input  wire [7:0] uio_in,
+    output wire [7:0] uo,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe
 );
 
-    localparam [2:0] CMD_PERIOD_LO = 3'd0;
-    localparam [2:0] CMD_PERIOD_HI = 3'd1;
-    localparam [2:0] CMD_SHIFT     = 3'd2;
-    localparam [2:0] CMD_ADDR      = 3'd3;
-    localparam [2:0] CMD_IMEM      = 3'd4;
-    localparam [2:0] CMD_PC        = 3'd5;
-    localparam [2:0] CMD_RUN       = 3'd6;
+    localparam [2:0] CMD_ADDR    = 3'd0;
+    localparam [2:0] CMD_WRITE   = 3'd1;
+    localparam [2:0] CMD_PAYLOAD = 3'd2;
+    localparam [2:0] CMD_PC      = 3'd3;
+    localparam [2:0] CMD_RUN     = 3'd4;
+    localparam [2:0] CMD_READ    = 3'd5;
 
-    localparam [3:0] OP_HALT  = 4'h0;
-    localparam [3:0] OP_SET   = 4'h2;
-    localparam [3:0] OP_SHIFT = 4'h3;
+    localparam [3:0] OP_HALT    = 4'h0;
+    localparam [3:0] OP_WAIT    = 4'h1;
+    localparam [3:0] OP_SET     = 4'h2;
+    localparam [3:0] OP_SHIFT   = 4'h3;
+    localparam [3:0] OP_IN      = 4'h4;
+    localparam [3:0] OP_OD      = 4'h5;
+    localparam [3:0] OP_ODSHIFT = 4'h6;
+    localparam [3:0] OP_HOLD    = 4'h7;
 
-    reg [15:0] period;
-    reg [7:0]  shift;
-    reg [7:0]  imem [0:15];
-    reg [3:0]  waddr;
-    reg [3:0]  pc;
+    reg [15:0] imem [0:31];
+    reg [15:0] t_reg, tlo_reg, thi_reg;
+    reg [7:0]  bind0, bind1, bind2, bind3, side_bind;
+    reg        out_dir, in_dir;
+    reg [3:0]  xreload;
+    reg [7:0]  oshift, ishift;
+    reg [4:0]  pc;
+    reg [7:0]  waddr;
     reg        running;
     reg [15:0] wait_left;
-    reg        tx_q;
+    reg [3:0]  xcnt;
+    reg [7:0]  uo_q, uio_q, uio_oe_q;
 
-    wire [15:0] ticks = (period == 16'd0) ? 16'd1 : period;
-    wire [7:0]  insn  = imem[pc];
+    wire       wr   = ui[0];
+    wire [2:0] cmd  = ui[3:1];
+    wire [7:0] wdata = uio_in;
+
+    wire [15:0] insn     = imem[pc];
+    wire [3:0]  op       = insn[15:12];
+    wire [1:0]  role     = insn[11:10];
+    wire        val      = insn[9];
+    wire        side     = insn[8];
+    wire        side_val = insn[7];
+    wire [2:0]  hold     = insn[6:4];
+    wire        xdec     = insn[3];
+    wire [1:0]  back     = insn[2:1];
+    wire        setx     = insn[0];
+
+    wire [7:0] role_b =
+        (role == 2'd0) ? bind0 :
+        (role == 2'd1) ? bind1 :
+        (role == 2'd2) ? bind2 : bind3;
+    wire [4:0] role_pin = role_b[4:0];
+    wire [4:0] side_pin = side_bind[4:0];
+    wire       side_od  = (side_bind[7:6] == 2'd2);
+
+    wire [3:0] x_set  = setx ? xreload : xcnt;
+    wire [3:0] x_next = xdec ? (x_set - 4'd1) : x_set;
+    wire       take_back = xdec && (x_next != 4'd0);
+    wire [4:0] pc_next = take_back ? (pc - {3'b0, back}) : (pc + 5'd1);
+
+    wire       out_bit = out_dir ? oshift[7] : oshift[0];
+    wire [7:0] oshift_next = out_dir ? {oshift[6:0], 1'b0} : {1'b0, oshift[7:1]};
+    wire       host_read = ~running & wr & (cmd == CMD_READ);
 
     integer i;
 
-    assign tx   = tx_q;
-    assign busy = running;
+    assign uo      = {running, uo_q[6:0]};
+    assign uio_out = host_read ? ishift : uio_q;
+    assign uio_oe  = host_read ? 8'hFF : uio_oe_q;
+
+    function [7:0] set_bit;
+        input [7:0] vec;
+        input [2:0] idx;
+        input       bitval;
+        integer k;
+        begin
+            for (k = 0; k < 8; k = k + 1)
+                if (k[2:0] == idx)
+                    set_bit[k] = bitval;
+                else
+                    set_bit[k] = vec[k];
+        end
+    endfunction
+
+    // cur is {uo, uio, oe}. od=1 is pull/release. od=0 is push-pull.
+    function [23:0] drive;
+        input [23:0] cur;
+        input [4:0]  pin;
+        input        od;
+        input        bitval;
+        reg [7:0] nuo, nuio, noe;
+        reg [2:0] idx;
+        begin
+            nuo  = cur[23:16];
+            nuio = cur[15:8];
+            noe  = cur[7:0];
+            if (pin >= 5'd8 && pin <= 5'd14) begin
+                idx = pin[2:0];
+                nuo = set_bit(nuo, idx, bitval);
+            end else if (pin >= 5'd16 && pin <= 5'd23) begin
+                idx = pin[2:0];
+                if (od) begin
+                    noe  = set_bit(noe, idx, ~bitval);
+                    nuio = set_bit(nuio, idx, 1'b0);
+                end else begin
+                    noe  = set_bit(noe, idx, 1'b1);
+                    nuio = set_bit(nuio, idx, bitval);
+                end
+            end
+            drive = {nuo, nuio, noe};
+        end
+    endfunction
+
+    function [23:0] drive_pair;
+        input [23:0] cur;
+        input        wr_role;
+        input        wr_side;
+        input        role_od;
+        input [4:0]  rpin;
+        input [4:0]  spin;
+        input        rval;
+        input        sval;
+        reg [23:0] p;
+        begin
+            p = cur;
+            if (wr_role)
+                p = drive(p, rpin, role_od, rval);
+            if (wr_side)
+                p = drive(p, spin, side_od, sval);
+            drive_pair = p;
+        end
+    endfunction
+
+    function [23:0] apply_idle;
+        input [23:0] cur;
+        input [7:0]  bcfg;
+        reg [1:0] mode;
+        reg       idle;
+        reg [4:0] pin;
+        reg [7:0] noe;
+        begin
+            mode = bcfg[7:6];
+            idle = bcfg[5];
+            pin  = bcfg[4:0];
+            if (mode == 2'd0) begin
+                apply_idle = cur;
+                if (pin >= 5'd16 && pin <= 5'd23) begin
+                    noe = set_bit(cur[7:0], pin[2:0], 1'b0);
+                    apply_idle[7:0] = noe;
+                end
+            end else if (mode == 2'd2)
+                apply_idle = drive(cur, pin, 1'b1, idle);
+            else if (mode == 2'd1)
+                apply_idle = drive(cur, pin, 1'b0, idle);
+            else
+                apply_idle = cur;
+        end
+    endfunction
+
+    // A function call in a continuous assign is not re-evaluated by Icarus
+    // when the pins change, so the sample is a mux.
+    wire sampled =
+        (role_pin < 5'd8)  ? ui[role_pin[2:0]] :
+        (role_pin < 5'd16) ? uo_q[role_pin[2:0]] :
+        uio_oe_q[role_pin[2:0]] ? uio_q[role_pin[2:0]] : uio_in[role_pin[2:0]];
+    wire [7:0] ishift_next = in_dir ? {ishift[6:0], sampled} : {sampled, ishift[7:1]};
+
+    function [15:0] hold_ticks;
+        input [2:0] h;
+        reg [15:0] n;
+        begin
+            case (h)
+                3'd0: n = t_reg;
+                3'd1: n = {1'b0, t_reg[15:1]};
+                3'd2: n = tlo_reg;
+                3'd3: n = thi_reg;
+                default: n = 16'd1;
+            endcase
+            hold_ticks = (n == 16'd0) ? 16'd1 : n;
+        end
+    endfunction
+
+    task commit_pins;
+        input [23:0] pins;
+        begin
+            uo_q     <= pins[23:16];
+            uio_q    <= pins[15:8];
+            uio_oe_q <= pins[7:0];
+        end
+    endtask
+
+    task retire;
+        input [2:0] hold_code;
+        begin
+            xcnt      <= x_next;
+            pc        <= pc_next;
+            wait_left <= hold_ticks(hold_code) - 16'd1;
+        end
+    endtask
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            period    <= 16'd1;
-            shift     <= 8'd0;
-            waddr     <= 4'd0;
-            pc        <= 4'd0;
+            t_reg     <= 16'd1;
+            tlo_reg   <= 16'd1;
+            thi_reg   <= 16'd1;
+            bind0     <= 8'd0;
+            bind1     <= 8'd0;
+            bind2     <= 8'd0;
+            bind3     <= 8'd0;
+            side_bind <= 8'd0;
+            out_dir   <= 1'b0;
+            in_dir    <= 1'b0;
+            xreload   <= 4'd0;
+            oshift    <= 8'd0;
+            ishift    <= 8'd0;
+            pc        <= 5'd0;
+            waddr     <= 8'd0;
             running   <= 1'b0;
             wait_left <= 16'd0;
-            tx_q      <= 1'b1;
-            for (i = 0; i < 16; i = i + 1)
-                imem[i] <= 8'h00;
+            xcnt      <= 4'd0;
+            // Bit 0 high is UART idle before a binding is loaded.
+            uo_q      <= 8'h01;
+            uio_q     <= 8'h00;
+            uio_oe_q  <= 8'h00;
+            for (i = 0; i < 32; i = i + 1)
+                imem[i] <= 16'h0000;
         end else if (!running) begin
             if (wr) begin
                 case (cmd)
-                    CMD_PERIOD_LO: period[7:0]  <= wdata;
-                    CMD_PERIOD_HI: period[15:8] <= wdata;
-                    CMD_SHIFT:     shift        <= wdata;
-                    CMD_ADDR:      waddr        <= wdata[3:0];
-                    CMD_IMEM: begin
-                        imem[waddr] <= wdata;
-                        waddr       <= waddr + 4'd1;
+                    CMD_ADDR: waddr <= wdata;
+                    CMD_WRITE: begin
+                        if (waddr < 8'h40) begin
+                            if (waddr[0])
+                                imem[waddr[5:1]][15:8] <= wdata;
+                            else
+                                imem[waddr[5:1]][7:0]  <= wdata;
+                        end else begin
+                            case (waddr)
+                                8'h40: t_reg[7:0]   <= wdata;
+                                8'h41: t_reg[15:8]  <= wdata;
+                                8'h42: tlo_reg[7:0]  <= wdata;
+                                8'h43: tlo_reg[15:8] <= wdata;
+                                8'h44: thi_reg[7:0]  <= wdata;
+                                8'h45: thi_reg[15:8] <= wdata;
+                                8'h46: begin
+                                    bind0 <= wdata;
+                                    commit_pins(apply_idle({uo_q, uio_q, uio_oe_q}, wdata));
+                                end
+                                8'h47: begin
+                                    bind1 <= wdata;
+                                    commit_pins(apply_idle({uo_q, uio_q, uio_oe_q}, wdata));
+                                end
+                                8'h48: begin
+                                    bind2 <= wdata;
+                                    commit_pins(apply_idle({uo_q, uio_q, uio_oe_q}, wdata));
+                                end
+                                8'h49: begin
+                                    bind3 <= wdata;
+                                    commit_pins(apply_idle({uo_q, uio_q, uio_oe_q}, wdata));
+                                end
+                                8'h4A: begin
+                                    side_bind <= wdata;
+                                    commit_pins(apply_idle({uo_q, uio_q, uio_oe_q}, wdata));
+                                end
+                                8'h4B: begin
+                                    out_dir <= wdata[7];
+                                    in_dir  <= wdata[6];
+                                    xreload <= wdata[3:0];
+                                end
+                                default: ;
+                            endcase
+                        end
+                        waddr <= waddr + 8'd1;
                     end
-                    CMD_PC:  pc      <= wdata[3:0];
+                    CMD_PAYLOAD: oshift <= wdata;
+                    CMD_PC:      pc     <= wdata[4:0];
                     CMD_RUN: begin
                         running   <= 1'b1;
                         wait_left <= 16'd0;
+                        ishift    <= 8'd0;
                     end
                     default: ;
                 endcase
@@ -87,20 +316,52 @@ module pin_engine (
         end else if (wait_left != 16'd0) begin
             wait_left <= wait_left - 16'd1;
         end else begin
-            case (insn[7:4])
+            case (op)
                 OP_HALT: running <= 1'b0;
+                OP_WAIT: begin
+                    if (sampled == val)
+                        retire(hold);
+                end
                 OP_SET: begin
-                    tx_q      <= insn[0];
-                    pc        <= pc + 4'd1;
-                    wait_left <= ticks - 16'd1;
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b1, side, 1'b0, role_pin, side_pin, val, side_val
+                    ));
+                    retire(hold);
                 end
                 OP_SHIFT: begin
-                    tx_q      <= shift[0];
-                    shift     <= {1'b0, shift[7:1]};
-                    pc        <= pc + 4'd1;
-                    wait_left <= ticks - 16'd1;
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b1, side, 1'b0, role_pin, side_pin, out_bit, side_val
+                    ));
+                    oshift <= oshift_next;
+                    retire(hold);
                 end
-                default: pc <= pc + 4'd1;
+                OP_IN: begin
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b0, side, 1'b0, role_pin, side_pin, 1'b0, side_val
+                    ));
+                    ishift <= ishift_next;
+                    retire(hold);
+                end
+                OP_OD: begin
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b1, side, 1'b1, role_pin, side_pin, val, side_val
+                    ));
+                    retire(hold);
+                end
+                OP_ODSHIFT: begin
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b1, side, 1'b1, role_pin, side_pin, out_bit, side_val
+                    ));
+                    oshift <= oshift_next;
+                    retire(hold);
+                end
+                OP_HOLD: retire(hold);
+                default: pc <= pc + 5'd1;
             endcase
         end
     end

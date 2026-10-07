@@ -2,13 +2,15 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Tiny Tapeout top for the Jane Street protocol-emulator ASIC.
- * Milestone: a UART 8N1 waveform, produced by a program on pin_engine.
+ * UART, SPI, and I2C are programs loaded into pin_engine.
  *
- *   ui_in[0]   write strobe, one clock
- *   ui_in[3:1] command
- *   uio_in     write data
- *   uo_out[0]  tx
- *   uo_out[1]  busy
+ *   ui_in[0]     write strobe, one clock, while stopped
+ *   ui_in[3:1]   command
+ *   ui_in[7:4]   free inputs. UART RX and SPI MISO use ui[4]
+ *   uio_in       write data while stopped; protocol wires while running
+ *   uo_out[6:0]  program outputs. Pin 8 is uo[0]
+ *   uo_out[7]    running. Pin 15 is this flag, not a protocol pin
+ *   uio_out/oe   program bidirectional pins, or the input shift on CMD_READ
  */
 
 `timescale 1ns/1ps
@@ -25,24 +27,17 @@ module tt_um_posamokshith_proto (
     input  wire       rst_n
 );
 
-    wire tx;
-    wire busy;
-
     pin_engine engine (
-        .clk   (clk),
-        .rst_n (rst_n),
-        .wr    (ui_in[0]),
-        .cmd   (ui_in[3:1]),
-        .wdata (uio_in),
-        .tx    (tx),
-        .busy  (busy)
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .ui      (ui_in),
+        .uio_in  (uio_in),
+        .uo      (uo_out),
+        .uio_out (uio_out),
+        .uio_oe  (uio_oe)
     );
 
-    assign uo_out  = {6'b0, busy, tx};
-    assign uio_out = 8'b0;
-    assign uio_oe  = 8'b0;
-
-    wire _unused = &{ena, ui_in[7:4], 1'b0};
+    wire _unused = &{ena, 1'b0};
 
 endmodule
 

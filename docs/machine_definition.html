@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Machine definition</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f3;
+      --fg: #1c1917;
+      --muted: #57534e;
+      --card: #ffffff;
+      --line: #e7e5e4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917;
+        --fg: #fafaf9;
+        --muted: #a8a29e;
+        --card: #292524;
+        --line: #44403c;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 17px/1.55 ui-sans-serif, system-ui, sans-serif;
+    }
+    main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.2rem; font-weight: 600; margin: 2.2rem 0 0.6rem; }
+    h3 { font-size: 1.05rem; font-weight: 600; margin: 1.4rem 0 0.4rem; }
+    p { margin: 0.7rem 0; }
+    .note { color: var(--muted); }
+    .katex-display { margin: 1rem 0; overflow-x: auto; overflow-y: hidden; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0 0; font-size: 0.92rem; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 0.45rem 0.5rem 0.45rem 0; vertical-align: top; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    pre {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 0.85rem 1rem;
+      overflow-x: auto;
+      font: 0.86rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Machine definition</h1>
+    <p class="note">What one interpreter has to do so the protocols in <code>docs/protocol_model.md</code> are programs. The protocol formulas are in <code>docs/protocol_definition.html</code>. The instruction words for UART, SPI, and I2C are in <code>docs/instruction_definition.html</code>.</p>
+
+    <h2>One tick, one step</h2>
+    <p>The machine is the interpreter beside the pins. One rising edge of the 50 MHz clock is one step. The step updates the state and drives the pins:</p>
+    $$q(t+1) = \delta_\rho\big(q(t), x(t)\big), \qquad a(t) = \lambda\big(q(t)\big).$$
+    <p>There is one program counter and one wait counter. A run is one program. The host fills that program in a load phase, while the machine is stopped. Drive and sample happen after that, while it is running.</p>
+
+    <h2>Names</h2>
+    <p>Each letter below is used in the formulas on this page.</p>
+    <table>
+      <thead>
+        <tr><th>Symbol</th><th>Name</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>\(t\)</td><td>tick</td><td>The step number. \(t = 0, 1, 2, \ldots\). Tick \(t\) is the physical instant \(t \times 20\,\mathrm{ns}\).</td></tr>
+        <tr><td>\(q(t)\)</td><td>state</td><td>The registers at tick \(t\): program counter, wait left, output shift, input shift, pin levels, pin enables, and \(\mathrm{running}\).</td></tr>
+        <tr><td>\(x(t)\)</td><td>sample</td><td>The bits read on the input pins at tick \(t\). On a bidirectional pin this is the wire after every chip has pulled or released.</td></tr>
+        <tr><td>\(a(t)\)</td><td>action</td><td>What the chip drives at tick \(t\): the output levels, the output enables, and the bidirectional levels.</td></tr>
+        <tr><td>\(\rho\)</td><td>program</td><td>The instruction bytes in memory. This is the agreement for one protocol. It stays fixed while \(\mathrm{running} = 1\).</td></tr>
+        <tr><td>\(\delta_\rho\)</td><td>next state</td><td>The rule that computes \(q(t+1)\) from the current state, the sample, and the instruction at the program counter.</td></tr>
+        <tr><td>\(\lambda\)</td><td>pin output</td><td>The rule that turns the state into the driven pins. A hold step keeps \(\lambda\) the same and only counts the wait down.</td></tr>
+        <tr><td>\(\mathrm{running}\)</td><td>run flag</td><td>\(1\) while a program is executing. \(0\) during load, after reset, and after the program stops.</td></tr>
+        <tr><td>\(Y\)</td><td>writes</td><td>The roles one run step changes. Each named role is set to \(0\), \(1\), pull, or release. At most two: the data role and, optionally, the side pin.</td></tr>
+        <tr><td>\(R\)</td><td>read</td><td>The role one run step samples into the input shift register. At most one.</td></tr>
+        <tr><td>\(T\)</td><td>period</td><td>How many ticks one bit stays on the wire. The baud rate is \(50\times 10^{6} / T\).</td></tr>
+        <tr><td>\(b\), \(b_i\)</td><td>byte, bit</td><td>The payload byte. \(b_7\) is the most significant bit and \(b_0\) is the least significant bit.</td></tr>
+        <tr><td>\(\mathrm{Enc}\)</td><td>encoding</td><td>The list of wire symbols for one byte. For UART that list includes the start bit and the stop bit.</td></tr>
+        <tr><td>\(t_0\)</td><td>start tick</td><td>The tick a start edge is seen. For UART, the line was \(1\) at \(t_0 - 1\) and is \(0\) at \(t_0\).</td></tr>
+        <tr><td>\(k\)</td><td>bit index</td><td>Which data bit is being driven or sampled. \(k = 0\) is the first data bit on the wire.</td></tr>
+        <tr><td>\(t_{\mathrm{sample}}(k)\)</td><td>sample tick</td><td>The tick when the receiver reads data bit \(k\).</td></tr>
+        <tr><td>\(N\)</td><td>hold</td><td>How many ticks the pins stay still after a run step. \(N = T\) for a UART bit. \(N = T/2\) reaches a midpoint.</td></tr>
+        <tr><td>\(s(t)\)</td><td>strobe</td><td>\(1\) on a tick when the host writes one field. \(0\) on every other tick.</td></tr>
+        <tr><td>\(c(t)\)</td><td>command</td><td>Which field \(s(t)\) writes: an instruction byte, the period, the pin map, the program counter, the payload, or run.</td></tr>
+        <tr><td>\(d(t)\)</td><td>data</td><td>The byte carried with \(c(t)\). Eight bits, presented on the data pins for that one tick.</td></tr>
+        <tr><td>\(\mathrm{pc}\)</td><td>program counter</td><td>The address of the instruction that will execute next. The host sets it during load. The run advances it.</td></tr>
+        <tr><td>\(\iota\)</td><td>pin map</td><td>Which physical pin each role uses. The host writes it during load. A step names a role, and \(\iota\) picks the pin.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>How many pins one step sets</h2>
+    <p>A run step writes a partial map \(Y\) and samples a partial set \(R\):</p>
+    $$|Y| \le 2, \qquad |R| \le 1. \tag{M1}$$
+    <p>\(Y\) assigns each named role one of \(\{0, 1, \mathrm{pull}, \mathrm{release}\}\). A role absent from \(Y\) keeps its level and its enable. \(R\) contributes one bit to the input shift register. Two is the width the instruction word can name: one data role and the side pin. SPI's busy half writes two pins and samples one. UART's sender writes one. JTAG's TCK, TMS, and TDI setup takes two ticks.</p>
+    <table>
+      <thead>
+        <tr><th>Protocol</th><th>Wires in the frame</th><th>Pins set on the widest step</th><th>Pins sampled on that step</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>UART sender</td><td>TX</td><td>1, TX</td><td>0</td></tr>
+        <tr><td>UART receiver</td><td>RX</td><td>0</td><td>1, RX</td></tr>
+        <tr><td>SPI</td><td>SCK, MOSI, MISO, CS</td><td>2, SCK and MOSI</td><td>1, MISO, on the other half</td></tr>
+        <tr><td>I2C</td><td>SCL, SDA</td><td>2, SCL and SDA</td><td>1, SDA, while SCL is high</td></tr>
+        <tr><td>JTAG</td><td>TCK, TMS, TDI, TDO</td><td>2, TCK and TDI; TMS on a second tick</td><td>1, TDO, on the other half</td></tr>
+        <tr><td>SWD</td><td>SWCLK, SWDIO</td><td>2, SWCLK and SWDIO</td><td>1, SWDIO, after the release</td></tr>
+        <tr><td>PS/2</td><td>CLK, DATA</td><td>1</td><td>1, DATA, after their clock edge</td></tr>
+        <tr><td>CAN</td><td>TX, RX</td><td>1, TX</td><td>1, RX, later in the same bit</td></tr>
+        <tr><td>USB low-speed</td><td>D+, D−</td><td>2</td><td>1</td></tr>
+      </tbody>
+    </table>
+    <p>SPI still has four wires. Chip-select changes on its own step, before the first bit and after the last, so it never joins SCK and MOSI on the bit step. The count in M1 is how many roles change on one tick, which is smaller than how many wires the protocol owns.</p>
+    <p>A 4-bit MII nibble changes four data pins on one tick. That is wider than M1, so Ethernet through a parallel PHY sits outside this machine. Low-speed USB fits in the two-pin row.</p>
+
+    <h2>Load phase</h2>
+    <p>Load is the phase before any edge of the frame. \(\mathrm{running} = 0\). The pins sit at idle. The other chip sees no frame yet. The host uses this stretch to write the program and the payload, one field per tick.</p>
+    <p>On tick \(t\) the host presents three values:</p>
+    $$s(t) \in \{0,1\}, \qquad c(t),\qquad d(t) \in \{0,1\}^8.$$
+    <p>\(s(t)\) is the strobe. It is \(1\) for exactly one tick when a write is intended, then returns to \(0\). \(c(t)\) names the field. \(d(t)\) is the byte stored into that field. A tick with \(s(t) = 0\) changes nothing. A tick with \(s(t) = 1\) while \(\mathrm{running} = 1\) also changes nothing: the run ignores the host.</p>
+    <p>On the chip today those three values are pins. \(s\) is <code>ui[0]</code>, \(c\) is <code>ui[3:1]</code>, and \(d\) is <code>uio[7:0]</code>. The same pins can be protocol wires later, during the run, because load and run never share a tick.</p>
+    <table>
+      <thead>
+        <tr><th>Field</th><th>What the host writes</th><th>How often</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>\(\rho\)</td><td>One instruction byte, at an address. The address then moves to the next slot.</td><td>Once per protocol</td></tr>
+        <tr><td>\(\iota\)</td><td>Which pin each role is bound to.</td><td>Once per protocol</td></tr>
+        <tr><td>\(T\)</td><td>The period, low byte then high byte.</td><td>Once per protocol, or when the baud rate changes</td></tr>
+        <tr><td>output shift</td><td>The payload byte to send. UART, SPI, and I2C call this the byte on the wire.</td><td>Once per frame</td></tr>
+        <tr><td>\(\mathrm{pc}\)</td><td>The address of the first instruction of this run.</td><td>Once per frame</td></tr>
+        <tr><td>\(\mathrm{running}\)</td><td>Set to \(1\). \(d(t)\) is ignored. This tick ends the load phase.</td><td>Once per frame</td></tr>
+      </tbody>
+    </table>
+    <p>The instruction at \(\mathrm{pc}\) executes on the tick after the write that sets \(\mathrm{running}\). That write itself is still a load tick, so it does not also run an instruction.</p>
+    <p>A UART sender load, as the engine accepts it, is the command list in <code>docs/instruction_definition.html</code>. Each line is one tick with \(s = 1\), and the following tick has \(s = 0\). The short form below is the older one-pin encoding, kept so the count of a frame is visible. The machine that runs today loads 16-bit words through <code>CMD_ADDR</code> and <code>CMD_WRITE</code>.</p>
+    <table>
+      <thead>
+        <tr><th>\(c\)</th><th>\(d\)</th><th>Effect</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>3</td><td>0</td><td>Instruction address \(= 0\)</td></tr>
+        <tr><td>4</td><td><code>0x20</code></td><td>\(\rho(0) =\) drive TX to 0, the start bit</td></tr>
+        <tr><td>4</td><td><code>0x30</code></td><td>Eight times. Each shifts the next payload bit out</td></tr>
+        <tr><td>4</td><td><code>0x21</code></td><td>Drive TX to 1, the stop bit</td></tr>
+        <tr><td>4</td><td><code>0x00</code></td><td>Stop. \(\mathrm{running}\) will clear when this instruction executes</td></tr>
+        <tr><td>0</td><td>\(T \bmod 256\)</td><td>Low byte of the period</td></tr>
+        <tr><td>1</td><td>\(\lfloor T / 256 \rfloor\)</td><td>High byte of the period</td></tr>
+        <tr><td>2</td><td>\(b\)</td><td>Payload. For <code>0xA5</code>, this byte is <code>0xA5</code></td></tr>
+        <tr><td>5</td><td>0</td><td>\(\mathrm{pc} = 0\)</td></tr>
+        <tr><td>6</td><td>0</td><td>\(\mathrm{running} = 1\). The frame begins on the next tick</td></tr>
+      </tbody>
+    </table>
+    <p>The receiver is the same phase with a different \(\rho\). Its instructions wait for the start edge and sample. The host writes no payload byte. After the program stops, a read while \(\mathrm{running} = 0\) presents the input shift register on the data pins for one tick. That byte is the value the receiver assembled.</p>
+    <p>The next frame of the same protocol is a short load. \(\rho\), \(\iota\), and \(T\) stay. The host writes the next payload, or reads the shift the receiver just filled, sets \(\mathrm{pc}\) back to the first instruction, and sets \(\mathrm{running}\). The instruction bytes are touched again only when the protocol changes, for example from the UART sender to the UART receiver.</p>
+
+    <h2>Two phases</h2>
+    <p>After load, every protocol here is a drive phase and a sample phase. Both are part of the machine. <code>src/pin_engine.v</code> runs both, on the pins the load map binds.</p>
+    <p>The two phases share a program counter when they share a clock. They are two programs when they do not.</p>
+
+    <h3>UART is two programs</h3>
+    <p>The sender and the receiver each have their own bit time. The receiver's start edge arrives on its own, in the middle of whatever the sender is doing. One wait counter runs one of those clocks. A single run is one phase.</p>
+    <p><strong>Sender.</strong> Push-pull on TX. Idle is 1. For a byte \(b = b_7 \ldots b_0\), least significant bit first, each symbol is held for \(T\) ticks:</p>
+    $$\mathrm{Enc}(b) = (0,\ b_0,\ b_1,\ b_2,\ b_3,\ b_4,\ b_5,\ b_6,\ b_7,\ 1).$$
+    <p>The frame is \(10T\) ticks. The step writes one pin and samples none. \(T = 5208\) at 9600 baud and \(T = 434\) at 115200 baud, the same counts as in the protocol note.</p>
+    <p><strong>Receiver.</strong> RX is an input. The program stalls until the line falls. That fall is tick \(t_0\). It then samples in the middle of each data bit:</p>
+    $$t_{\mathrm{sample}}(k) = t_0 + T + \frac{T}{2} + kT, \qquad k = 0,\ldots,7. \tag{M2}$$
+    <p>The first sample is the middle of bit 0. Each later sample is one bit-time after the previous one. The stop bit is the same kind of sample at \(k = 8\), and the program checks that it reads 1. The step writes no pin. The assembled byte sits in the shift register for the host to read after the program stops.</p>
+    <p>M2 is a whole number of ticks when the sender's \(T\) is even. Both standard periods are even: \(5208/2 = 2604\) and \(434/2 = 217\). A receiver period has to stay even so the midpoint lands on a tick.</p>
+    <p>Both wires are connected for the whole time the chip is on the board. The sender program and the receiver program are loaded one run at a time. Overlapping the two frames on the same ticks means a second copy of the program counter, the wait, and the shift registers. One copy covers the requirement: send an 8N1 frame, and on another run assemble a byte from RX.</p>
+
+    <h3>A clock this side generates is two steps</h3>
+    <p>SPI, I2C, JTAG, and SWD share one clock, so the drive phase and the sample phase are two steps of one program, and one wait covers both.</p>
+    <p>Phase 0 presents the data with the clock in its setup polarity. Phase 1 moves the clock to the sample polarity and captures the input. The other chip then sees a stable bit on the sampling edge. At the fastest SPI clock those two steps are the whole period: one tick low, one tick high.</p>
+    <table>
+      <thead>
+        <tr><th></th><th>Phase 0, drive</th><th>Phase 1, sample</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SPI</td><td>MOSI takes the next bit, SCK low</td><td>SCK high, sample MISO</td></tr>
+        <tr><td>I2C</td><td>SDA pulls or releases, SCL pulled low</td><td>SCL released, wait until it reads 1, sample SDA</td></tr>
+        <tr><td>JTAG</td><td>TCK low, TDI. TMS is a second tick</td><td>TCK high, sample TDO</td></tr>
+        <tr><td>SWD</td><td>SWCLK low, SWDIO driven or released</td><td>SWCLK high, sample SWDIO when the target owns it</td></tr>
+      </tbody>
+    </table>
+    <p>I2C's phase 1 is also where clock stretching lives. The wait is "until SCL reads 1", which may last longer than the nominal high time. SWD's phase 1 is where the wire turns around: SWDIO is released for a few clocks, sampled for the ACK, then driven again.</p>
+
+    <h3>Their clock, and a sample inside the bit</h3>
+    <p>PS/2 is the UART frame with the other side making the clock. The drive phase and the sample phase both wait for an edge on CLK, then change or read DATA. The edge is the synchronizer. A bit lasts thousands of ticks, so the wait dominates.</p>
+    <p>CAN keeps one bit time and places the sample inside it. The drive phase sets TX at the start of the 50 ticks. The sample phase reads RX at a later tick in that same cell, after a hold. The bit read back can disagree with the bit just driven. That disagreement is lost arbitration, the same fact as an I2C acknowledgement.</p>
+
+    <h2>What a run step is allowed to do</h2>
+    <p>These are the effects a program can ask for. They are the eight moves from the protocol note, with the pin width from M1 filled in.</p>
+    <table>
+      <thead>
+        <tr><th>Effect</th><th>What changes on that tick</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Write</td><td>Up to two roles, each to 0, 1, pull, or release. UART start and stop, SPI chip-select, I2C start and stop. JTAG's third pin is a second tick.</td></tr>
+        <tr><td>Shift out</td><td>The next payload bit onto one of those roles. LSB first for UART, JTAG, and PS/2. MSB first for SPI and I2C. The direction is part of the program.</td></tr>
+        <tr><td>Shift in</td><td>One role into the input shift register. UART RX, MISO, TDO, SDA on the acknowledgement, CAN at the sample point.</td></tr>
+        <tr><td>Hold</td><td>Pins stay. The wait counts down \(N\) ticks. \(N = T\) for a UART bit, \(N = T/2\) to reach a midpoint, one tick for the fast SPI half.</td></tr>
+        <tr><td>Stall</td><td>Pins stay until a named role reads 0 or 1. UART start edge, I2C stretch, PS/2 clock.</td></tr>
+        <tr><td>Count and branch</td><td>A scratch counter of at least 8, so a loop can run eight data bits or nine with the acknowledgement.</td></tr>
+        <tr><td>Stop</td><td>\(\mathrm{running}\) clears. Pins hold their last level. The host reads the input shift and may write the next payload.</td></tr>
+      </tbody>
+    </table>
+    <p>Open-drain is the pull and the release, applied per bit. A 0 in the shift register pulls the wire low. A 1 releases it. Push-pull is the 0 and the 1, with the enable held on for the whole frame. SWD uses both: strong levels while this side owns SWDIO, release while the target owns it.</p>
+
+    <h2>Each protocol as two phases</h2>
+    <table>
+      <thead>
+        <tr><th>Protocol</th><th>Drive phase</th><th>Sample phase</th><th>One program or two</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>UART</td><td>Hold each of the ten symbols on TX for \(T\) ticks</td><td>Wait for the fall, sample RX at the instants in M2</td><td>Two programs, one run each</td></tr>
+        <tr><td>SPI</td><td>MOSI and SCK low</td><td>SCK high, capture MISO</td><td>One program, two steps per bit</td></tr>
+        <tr><td>I2C</td><td>SDA bit with SCL low</td><td>Release SCL, wait for it to rise, read SDA</td><td>One program. Start and stop are writes of both pins.</td></tr>
+        <tr><td>JTAG</td><td>TCK low, TDI. TMS on a second tick</td><td>TCK high, capture TDO</td><td>One program. The TAP diagram can stay in the host.</td></tr>
+        <tr><td>SWD</td><td>Clock the header out, then release SWDIO</td><td>Clock the ACK and the data in</td><td>One program. The turnaround is those steps.</td></tr>
+        <tr><td>PS/2</td><td>After a CLK edge, set DATA, or pull CLK to inhibit</td><td>After a CLK edge, read DATA</td><td>One program. Their clock is the wait.</td></tr>
+        <tr><td>CAN</td><td>TX at the start of the 50-tick cell</td><td>RX at a chosen later tick in that cell</td><td>One program. CRC stays in the host.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The first three protocols, as programs</h2>
+    <p>These are the UART sender, the UART receiver, SPI, and I2C in the form a person can read. Each line is one run step. The text in square brackets is the hold loaded by that step: the pins stay at the levels this line wrote for that many ticks. The same four programs, written as the instruction words from <code>src/pin_engine.v</code>, are in <code>docs/instruction_definition.html</code>.</p>
+    <table>
+      <thead>
+        <tr><th>Line</th><th>What happens on that tick</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>drive pin, 0</code> or <code>1</code></td><td>Push-pull. The pin is driven to that level.</td></tr>
+        <tr><td><code>pull pin</code></td><td>Open-drain 0. The pin is driven low.</td></tr>
+        <tr><td><code>release pin</code></td><td>Open-drain 1. The driver turns off and the resistor makes the wire 1.</td></tr>
+        <tr><td><code>out pin</code></td><td>The next payload bit is driven onto that pin. UART shifts bit 0 out first. SPI and I2C shift bit 7 out first. The direction is loaded with the program.</td></tr>
+        <tr><td><code>outdir pin</code></td><td>The same payload bit chooses the driver. A 0 pulls. A 1 releases. This is an I2C data bit.</td></tr>
+        <tr><td><code>in pin</code></td><td>The pin is sampled into the input shift register.</td></tr>
+        <tr><td><code>side pin, level</code></td><td>A second pin written on that same tick. The clock beside the data bit.</td></tr>
+        <tr><td><code>[T]</code> <code>[T/2]</code> <code>[Tlo]</code> <code>[Thi]</code></td><td>The hold. <code>T</code> is the UART bit time. <code>T/2</code> needs <code>T</code> even. <code>Tlo</code> and <code>Thi</code> are the two halves of a clock this side generates.</td></tr>
+        <tr><td><code>wait pin, 0</code> or <code>1</code></td><td>Pins stay until that pin reads the named level.</td></tr>
+        <tr><td><code>set x, 8</code> and <code>x-- label</code></td><td>Written at the end of a pin line, so the count does not insert a tick of its own. <code>x</code> decreases by 1. While it is still greater than 0, the instruction after this hold is <code>label</code>. Starting from 8 runs the body eight times.</td></tr>
+        <tr><td><code>halt</code></td><td><code>running</code> clears. Pins hold. The host may read the input shift and write the next payload.</td></tr>
+      </tbody>
+    </table>
+    <p>A pin this line does not name keeps the level it already had. <code>T</code> for 9600 baud is 5208, which is wider than an instruction, so the hold lengths are registers written in the load phase. Both halves have to be loaded before the run, because a running program cannot ask the host for a new count.</p>
+
+    <h3>UART sender</h3>
+    <p>One wire, TX, driven both ways. The host has loaded <code>T</code> and the byte. Ten symbols, each held for <code>T</code>.</p>
+<pre>drive   tx, 0                 [T]   set x, 8    ; start bit
+bits:
+out     tx                    [T]   x-- bits    ; data, bit 0 first
+drive   tx, 1                 [T]               ; stop bit
+halt</pre>
+
+    <h3>UART receiver</h3>
+    <p>A second program, loaded in its own load phase and run on its own. RX is only sampled. The <code>wait</code> tick is the start edge. The two holds after it are the rest of the start bit and half of bit 0, so the first <code>in</code> lands in the middle of bit 0. Each later <code>in</code> is one bit time after the previous one.</p>
+<pre>wait    rx, 0                               ; start edge, t0
+hold                          [T]           ; rest of the start bit
+hold                          [T/2] set x, 8 ; middle of bit 0
+bits:
+in      rx                    [T]   x-- bits ; sample, then one bit time
+wait    rx, 1                               ; stop bit. a 0 stalls here
+halt</pre>
+
+    <h3>SPI master</h3>
+    <p>One program. Mode 0: the clock idles at 0, and the other chip samples MOSI on the rising edge. Each bit is two steps. The first writes MOSI and holds SCK low. The second raises SCK and samples MISO. Chip-select is its own step, so the bit step still writes two pins.</p>
+<pre>drive   cs, 0                 [Tlo] set x, 8
+bits:
+out     mosi   side sck, 0    [Tlo]             ; data stable, clock low
+in      miso   side sck, 1    [Thi] x-- bits    ; clock rises, sample
+drive   cs, 1                 [Tlo]
+halt</pre>
+    <p>The fastest clock is <code>Tlo = Thi = 1</code>, one tick low and one tick high. <code>side</code> is what makes that fit: the data pin and the clock pin change on the same tick.</p>
+    <p>Several slaves stay on this ASIC. SCK, MOSI, and MISO are shared. Each slave has its own CS pin driven by this chip. Role 1 is one CS in the program; role 3 can be a second. Further selects use leftover <code>uo</code> or <code>uio</code> pins, asserted by the host before the run. No off-chip CS demux. Only one CS is low at a time.</p>
+
+    <h3>I2C master</h3>
+    <p>One program. Role 0 is SDA and role 1 is SCL, both open-drain, and the side pin is SCL. A 1 is a release and a 0 is a pull, so the data bit is <code>OP_ODSHIFT</code> and a constant level is <code>OP_OD</code>. The payload is the address byte the host loaded: seven address bits and the read/write bit, most significant bit first. The wires do not know that it is an address. The words are the ones in <code>docs/instruction_definition.html</code>.</p>
+<pre>;  0  start: SDA falls while SCL stays released
+0x51A0  OP_OD       SDA pull,  side SCL release   [Tlo]
+0x5421  OP_OD       SCL pull                       [Tlo]  setx
+
+;  2  bits
+0x6120  OP_ODSHIFT  SDA,       side SCL pull       [Tlo]
+0x5640  OP_OD       SCL release                    [1]
+0x1650  OP_WAIT     SCL, 1
+0x403E  OP_IN       SDA                            [Thi]  xdec, back 3
+
+;  6  acknowledgement: we release SDA, they may pull it
+0x5320  OP_OD       SDA release, side SCL pull     [Tlo]
+0x5640  OP_OD       SCL release                    [1]
+0x1650  OP_WAIT     SCL, 1
+0x4030  OP_IN       SDA                            [Thi]         ; 0 means they acknowledged
+0x5421  OP_OD       SCL pull                       [Tlo]  setx ; x = 8 for the next byte
+
+; 11  stop: SDA rises while SCL is high
+0x5120  OP_OD       SDA pull,  side SCL pull       [Tlo]
+0x5640  OP_OD       SCL release                    [1]
+0x1650  OP_WAIT     SCL, 1
+0x53B0  OP_OD       SDA release, side SCL release  [Thi]
+0x0000  OP_HALT</pre>
+    <p><code>xdec, back 3</code> on address 5 returns to address 2 while <code>x</code> stays above 0, so the bit step runs eight times. A second data byte repeats addresses 2 through 10. Halting after address 10 leaves SCL pulled, which holds the bus. That instruction also reloads <code>x</code>, because the loop leaves it at 0. The host writes the next payload, sets <code>pc</code> to 2, and runs. The stop at address 11 runs after the last byte.</p>
+
+    <h3>What these four programs ask of the hardware</h3>
+    <table>
+      <thead>
+        <tr><th>Used by</th><th>The machine needs</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>UART sender</td><td>Drive one pin to 0 or 1, shift a bit out least-significant-bit first, hold for a 16-bit <code>T</code>, count eight, stop.</td></tr>
+        <tr><td>UART receiver</td><td>Stall until a pin reads 0. Hold <code>T</code> and <code>T/2</code>. Shift a pin into a register. This is a second program, run on its own.</td></tr>
+        <tr><td>SPI</td><td>Write two pins on one tick. Shift out and shift in, most significant bit first. Two hold lengths, each allowed to be a single tick.</td></tr>
+        <tr><td>I2C</td><td>Pull or release, chosen by the payload bit. Write the data pin and the clock pin on one tick. Stall until a released clock reads 1. Sample the data pin while it is released. Stop with the clock still pulled low, so the host can supply the next byte.</td></tr>
+      </tbody>
+    </table>
+    <p><code>src/pin_engine.v</code> runs these four programs. The sender drives one pin. The receiver waits and samples. SPI writes the clock beside the data bit. I2C pulls, releases, and waits out a stretched clock.</p>
+
+    <h2>Idle levels</h2>
+    <p>Reset, and every tick of the load phase, leaves the driven pins at the idle level of the program that will run. TX sits at 1. An I2C pin is released. SPI chip-select sits at 1. SCK sits at the idle level of the mode. The first instruction of the run is what moves a pin off that idle level.</p>
+  </main>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      renderMathInElement(document.body, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\(", right: "\\)", display: false }
+        ],
+        throwOnError: false
+      });
+    });
+  </script>
+</body>
+</html>
