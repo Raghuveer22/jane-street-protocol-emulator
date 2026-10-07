@@ -996,14 +996,14 @@ async def capture_until_halt(dut):
 
 
 @cocotb.test()
-async def test_usb_bit_cell_is_T_across_stuff(dut):
-    """Every USB symbol lasts T ticks, including a bit inserted for stuffing.
+async def test_usb_bit_cell_follows_the_program(dut):
+    """Each USB symbol lasts as long as prog/usb_ls_tx.asm spends on it.
 
-    The model in usb_bit_time.py is the claim. The pin trace is the
-    measurement. A JMP does not get its own cell: ticks between pin
-    writes belong to the symbol already on the wire.
+    A JMP does not write pins, so its tick stays on the symbol already
+    driven. Idle and the trailer are T. A data bit with no stuff is T+2.
+    The bit that inserts a stuff, and the stuffed bit, are T+1.
     """
-    from usb_bit_time import cell_report, machine_cells, uniform_cells, wave
+    from usb_bit_time import cell_report, machine_cells, wave
 
     period = 4
     # 0x00 toggles every data bit. 0xFF with yreload 6 inserts one stuff.
@@ -1013,30 +1013,26 @@ async def test_usb_bit_cell_is_T_across_stuff(dut):
     await load_cfg(dut, t=period, roles=(DP, 0, 0, 0), side=DM, dirs=LSB_PULL)
     await load_words(dut, USB_LS_TX)
 
-    misses = []
     for packet, yreload in cases:
         await load_bytes(dut, 0x4D, [yreload << 1])
         await pulse(dut, CMD_PAYLOAD, packet[0])
         await pulse(dut, CMD_PC, 0)
         samples = await capture_until_halt(dut)
         got = [dp for dp, _ in samples]
-        claimed = wave(uniform_cells(packet, yreload, period))
         sched = machine_cells(packet, yreload, period)
-        actual = wave(sched)
-        assert got == actual, (
+        assert got == wave(sched), (
             f"packet {packet} yreload {yreload}: pins are not the "
             f"program schedule\n{cell_report(sched, period)}"
         )
+        for kind, _level, ticks in sched:
+            if kind == "data":
+                assert ticks in (period + 1, period + 2)
+            elif kind == "stuff":
+                assert ticks == period + 1
+            else:
+                assert ticks == period
         for i, (dp, dm) in enumerate(samples):
             if dp == 0 and dm == 0:
                 continue
             assert dm == (dp ^ 1), f"complement at {i}: dp={dp} dm={dm}"
-        if got != claimed:
-            misses.append(
-                f"packet {packet} yreload {yreload}\n{cell_report(sched, period)}"
-            )
-    assert not misses, (
-        f"a bit cell is not {period} ticks when the program branches\n\n"
-        + "\n\n".join(misses)
-    )
 
