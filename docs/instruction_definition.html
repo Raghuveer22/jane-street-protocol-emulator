@@ -113,6 +113,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
         <tr><td><code>0x46</code>–<code>0x49</code></td><td>Role 0 to role 3, one binding byte each.</td></tr>
         <tr><td><code>0x4A</code></td><td>The side pin, same binding byte.</td></tr>
         <tr><td><code>0x4B</code></td><td>Shift directions and the loop reload.</td></tr>
+        <tr><td><code>0x4C</code></td><td>Shift width and base pin. Left at reset, the width is one bit and the role pin is used.</td></tr>
       </tbody>
     </table>
     <p>A binding byte is <code>{mode[1:0], idle, pin[4:0]}</code>.</p>
@@ -126,7 +127,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
         <tr><td>4:0</td><td><code>pin</code></td><td>0–7 are <code>ui</code>, 8–15 are <code>uo</code>, 16–23 are <code>uio</code>.</td></tr>
       </tbody>
     </table>
-    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, autopull, autopush, xreload[3:0]}</code>.</p>
+    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, autopull, autopush, xreload[3:0]}</code>. Byte <code>0x4C</code> is <code>{0, width[1:0], base[4:0]}</code>. Width 0 is one bit, 1 is two bits, 2 is four. The low pin of the group is the low bit. A group stays inside one port.</p>
     <table>
       <thead>
         <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>

@@ -13,6 +13,7 @@ The host is the test, or later a controller on the board. It fills the interpret
 | `T`, `Tlo`, `Thi` | 16 bits each | The hold lengths a step can name. `T/2` is `T` shifted right by 1 |
 | roles 0–3, side | one byte each | Which pin, how it is driven, and the idle level |
 | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` | packed in one byte | Bit order, FIFO refill, and the value `setx` loads |
+| shift width, base pin | one byte, `0x4C` | 1, 2, or 4 bits, starting at a pin. Width 1 uses the role |
 | TX FIFO, RX FIFO | 4 bytes each | Bytes queued ahead of the shift registers |
 | output shift | 8 bits | The payload byte |
 | input shift | 8 bits | The byte assembled from sampled pins |

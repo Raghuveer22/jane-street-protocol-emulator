@@ -8,8 +8,8 @@
  *   OP_HALT    0x0  running = 0. Pins stay.
  *   OP_WAIT    0x1  stall until role reads val
  *   OP_SET     0x2  drive role to val, push-pull
- *   OP_SHIFT   0x3  drive role to the next payload bit, push-pull
- *   OP_IN      0x4  sample role into the input shift
+ *   OP_SHIFT   0x3  drive the next payload bits, push-pull
+ *   OP_IN      0x4  sample into the input shift
  *   OP_OD      0x5  pull or release role. val 0 pulls, val 1 releases
  *   OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
  *   OP_HOLD    0x7  change no pin, only load the wait
@@ -59,6 +59,8 @@ module pin_engine (
     reg [7:0]  bind0, bind1, bind2, bind3, side_bind;
     reg        out_dir, in_dir, autopull, autopush;
     reg [3:0]  xreload;
+    reg [1:0]  width_code;
+    reg [4:0]  base_pin;
     reg [7:0]  tx_mem [0:3];
     reg [7:0]  rx_mem [0:3];
     reg [1:0]  tx_w, tx_r, rx_w, rx_r;
@@ -105,8 +107,21 @@ module pin_engine (
     wire       take_back = xdec && (x_next != 4'd0);
     wire [4:0] pc_next = take_back ? (pc - {3'b0, back}) : (pc + 5'd1);
 
+    // 00 and 11 are one bit. 01 is two. 10 is four. One bit uses the role pin.
+    wire [2:0] sh_width =
+        (width_code == 2'd1) ? 3'd2 :
+        (width_code == 2'd2) ? 3'd4 : 3'd1;
+    wire       wide = (sh_width != 3'd1);
     wire       out_bit = out_dir ? oshift[7] : oshift[0];
-    wire [7:0] oshift_next = out_dir ? {oshift[6:0], 1'b0} : {1'b0, oshift[7:1]};
+    // Low bit of the group is base+0. MSB-first sends the high group first.
+    wire [3:0] out_group =
+        (sh_width == 3'd4) ? (out_dir ? oshift[7:4] : oshift[3:0]) :
+        (sh_width == 3'd2) ? (out_dir ? oshift[7:6] : oshift[1:0]) :
+                             {3'b0, out_bit};
+    wire [7:0] oshift_next =
+        (sh_width == 3'd4) ? (out_dir ? {oshift[3:0], 4'b0} : {4'b0, oshift[7:4]}) :
+        (sh_width == 3'd2) ? (out_dir ? {oshift[5:0], 2'b0} : {2'b0, oshift[7:2]}) :
+                             (out_dir ? {oshift[6:0], 1'b0} : {1'b0, oshift[7:1]});
     wire       show_ishift = ~running & wr & (cmd == CMD_READ);
     wire       show_pop    = wr & (cmd == CMD_POP);
     wire       show_status = running & wr & (cmd == CMD_READ);
@@ -194,6 +209,61 @@ module pin_engine (
         end
     endfunction
 
+    function same_port;
+        input [4:0] a;
+        input [4:0] b;
+        reg [1:0] pa, pb;
+        begin
+            pa = (a <= 5'd7) ? 2'd0 :
+                 (a <= 5'd14) ? 2'd1 :
+                 ((a >= 5'd16) && (a <= 5'd23)) ? 2'd2 : 2'd3;
+            pb = (b <= 5'd7) ? 2'd0 :
+                 (b <= 5'd14) ? 2'd1 :
+                 ((b >= 5'd16) && (b <= 5'd23)) ? 2'd2 : 2'd3;
+            same_port = (pa != 2'd3) && (pa == pb);
+        end
+    endfunction
+
+    // Width 2 or 4. base+0 is the low bit of the group. Side is applied after,
+    // so a clock on the same tick wins if it overlaps a data pin.
+    function [23:0] drive_bus;
+        input [23:0] cur;
+        input        wr_data;
+        input        od;
+        input [3:0]  bits;
+        input        wr_side;
+        input        sval;
+        integer n;
+        reg [23:0] p;
+        reg [4:0] pin;
+        begin
+            p = cur;
+            if (wr_data)
+                for (n = 0; n < 4; n = n + 1)
+                    if (n < sh_width) begin
+                        pin = base_pin + n[4:0];
+                        if (same_port(base_pin, pin))
+                            p = drive(p, pin, od, bits[n]);
+                    end
+            if (wr_side)
+                p = drive(p, side_pin, side_od, sval);
+            drive_bus = p;
+        end
+    endfunction
+
+    function level_of;
+        input [4:0] pin;
+        input [7:0] ui_i, uo_i, uio_i, uioe_i, uioin_i;
+        begin
+            if (pin < 5'd8)
+                level_of = ui_i[pin[2:0]];
+            else if (pin < 5'd16)
+                level_of = uo_i[pin[2:0]];
+            else
+                level_of = uioe_i[pin[2:0]] ? uio_i[pin[2:0]] : uioin_i[pin[2:0]];
+        end
+    endfunction
+
     function [23:0] apply_idle;
         input [23:0] cur;
         input [7:0]  bcfg;
@@ -226,7 +296,22 @@ module pin_engine (
         (role_pin < 5'd8)  ? ui[role_pin[2:0]] :
         (role_pin < 5'd16) ? uo_q[role_pin[2:0]] :
         uio_oe_q[role_pin[2:0]] ? uio_q[role_pin[2:0]] : uio_in[role_pin[2:0]];
-    wire [7:0] ishift_next = in_dir ? {ishift[6:0], sampled} : {sampled, ishift[7:1]};
+    // Arguments are passed in so a change on ui/uio retriggers this block.
+    reg [3:0] in_group;
+    always @(*) begin
+        in_group[0] = same_port(base_pin, base_pin)
+            ? level_of(base_pin, ui, uo_q, uio_q, uio_oe_q, uio_in) : 1'b0;
+        in_group[1] = same_port(base_pin, base_pin + 5'd1)
+            ? level_of(base_pin + 5'd1, ui, uo_q, uio_q, uio_oe_q, uio_in) : 1'b0;
+        in_group[2] = same_port(base_pin, base_pin + 5'd2)
+            ? level_of(base_pin + 5'd2, ui, uo_q, uio_q, uio_oe_q, uio_in) : 1'b0;
+        in_group[3] = same_port(base_pin, base_pin + 5'd3)
+            ? level_of(base_pin + 5'd3, ui, uo_q, uio_q, uio_oe_q, uio_in) : 1'b0;
+    end
+    wire [7:0] ishift_next =
+        (sh_width == 3'd4) ? (in_dir ? {ishift[3:0], in_group} : {in_group, ishift[7:4]}) :
+        (sh_width == 3'd2) ? (in_dir ? {ishift[5:0], in_group[1:0]} : {in_group[1:0], ishift[7:2]}) :
+                             (in_dir ? {ishift[6:0], sampled} : {sampled, ishift[7:1]});
 
     function [15:0] hold_ticks;
         input [2:0] h;
@@ -267,11 +352,11 @@ module pin_engine (
         end
     endtask
 
-    // The 8th SHIFT/ODSHIFT of a byte. The pin already took `out_bit`.
-    // A queued byte replaces the emptied register on this same clock.
+    // The shift that finishes the current byte. The pins already took
+    // this step's bits. A queued byte replaces the register on this clock.
     task take_out_bit;
         begin
-            if (autopull && (shift_n == 4'd7)) begin
+            if (autopull && (({1'b0, shift_n} + {2'b0, sh_width}) >= 5'd8)) begin
                 if (tx_count != 3'd0) begin
                     oshift    <= tx_mem[tx_r];
                     eng_pop_b  = 1'b1;
@@ -292,7 +377,7 @@ module pin_engine (
             end else begin
                 oshift <= oshift_next;
                 if (autopull)
-                    shift_n <= shift_n + 4'd1;
+                    shift_n <= shift_n + {1'b0, sh_width};
             end
         end
     endtask
@@ -309,9 +394,11 @@ module pin_engine (
             side_bind <= 8'd0;
             out_dir   <= 1'b0;
             in_dir    <= 1'b0;
-            autopull  <= 1'b0;
-            autopush  <= 1'b0;
-            xreload   <= 4'd0;
+            autopull   <= 1'b0;
+            autopush   <= 1'b0;
+            xreload    <= 4'd0;
+            width_code <= 2'd0;
+            base_pin   <= 5'd0;
             oshift    <= 8'd0;
             ishift    <= 8'd0;
             pc        <= 5'd0;
@@ -391,6 +478,10 @@ module pin_engine (
                                         autopush <= wdata[4];
                                         xreload  <= wdata[3:0];
                                     end
+                                    8'h4C: begin
+                                        width_code <= wdata[6:5];
+                                        base_pin   <= wdata[4:0];
+                                    end
                                     default: ;
                                 endcase
                             end
@@ -458,20 +549,32 @@ module pin_engine (
                         retire(hold);
                     end
                     OP_SHIFT: begin
-                        commit_pins(drive_pair(
-                            {uo_q, uio_q, uio_oe_q},
-                            1'b1, side, 1'b0, role_pin, side_pin, out_bit, side_val
-                        ));
+                        if (wide)
+                            commit_pins(drive_bus(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, 1'b0, out_group, side, side_val
+                            ));
+                        else
+                            commit_pins(drive_pair(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, side, 1'b0, role_pin, side_pin, out_bit, side_val
+                            ));
                         take_out_bit();
                         retire(hold);
                     end
                     OP_IN: begin
-                        commit_pins(drive_pair(
-                            {uo_q, uio_q, uio_oe_q},
-                            1'b0, side, 1'b0, role_pin, side_pin, 1'b0, side_val
-                        ));
+                        if (wide)
+                            commit_pins(drive_bus(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b0, 1'b0, 4'b0, side, side_val
+                            ));
+                        else
+                            commit_pins(drive_pair(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b0, side, 1'b0, role_pin, side_pin, 1'b0, side_val
+                            ));
                         ishift <= ishift_next;
-                        if (autopush && (in_n == 4'd7)) begin
+                        if (autopush && (({1'b0, in_n} + {2'b0, sh_width}) >= 5'd8)) begin
                             if ((rx_count < 3'd4) || (host_pop_b && (rx_count != 3'd0))) begin
                                 eng_push_b       = 1'b1;
                                 eng_push_data_b  = ishift_next;
@@ -479,7 +582,7 @@ module pin_engine (
                                 rx_over_b = 1'b1;
                             in_n <= 4'd0;
                         end else if (autopush)
-                            in_n <= in_n + 4'd1;
+                            in_n <= in_n + {1'b0, sh_width};
                         retire(hold);
                     end
                     OP_OD: begin
@@ -490,10 +593,16 @@ module pin_engine (
                         retire(hold);
                     end
                     OP_ODSHIFT: begin
-                        commit_pins(drive_pair(
-                            {uo_q, uio_q, uio_oe_q},
-                            1'b1, side, 1'b1, role_pin, side_pin, out_bit, side_val
-                        ));
+                        if (wide)
+                            commit_pins(drive_bus(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, 1'b1, out_group, side, side_val
+                            ));
+                        else
+                            commit_pins(drive_pair(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, side, 1'b1, role_pin, side_pin, out_bit, side_val
+                            ));
                         take_out_bit();
                         retire(hold);
                     end

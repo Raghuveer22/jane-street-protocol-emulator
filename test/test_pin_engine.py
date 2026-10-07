@@ -51,6 +51,11 @@ MSB_FIFO = 0xF8 # MSB8 plus autopull and autopush
 UART_TX_STREAM = [0x2001, 0x3008, 0x220D]
 UART_RX_STREAM = [0x1001, 0x7010, 0x4008, 0x125F]
 SPI_STREAM = [0x2421, 0x3120, 0x49BB]
+# Two nibbles, then halt. Side is SCK. Width and base come from 0x4C.
+QSPI_OUT = [0x3140, 0x31C0, 0x0000]
+# setx, then four shifts of one group. xreload is the number of groups.
+QSPI_GROUPS = [0x7041, 0x3048, 0x0000]
+QSPI_IN = [0x4040, 0x4040, 0x0000]
 
 
 def uo(dut):
@@ -605,4 +610,80 @@ async def test_spi_stream_two_bytes(dut):
     assert sent == [0xA5, 0x3C]
     assert await pop_rx(dut) == 0x96
     assert await pop_rx(dut) == 0x0F
+
+
+def uo_nibble(dut):
+    return uo(dut) & 0xF
+
+
+@cocotb.test()
+async def test_qspi_nibbles(dut):
+    """Four data pins move with the clock. uo[3:0] is the nibble, uo[4] is SCK."""
+    await boot(dut)
+    await load_cfg(dut, roles=(0, 0, 0, 0), side=0x4C, dirs=0x80)
+    await load_bytes(dut, 0x4C, [0x48])  # width 4, base pin 8
+    await load_words(dut, QSPI_OUT)
+    await pulse(dut, CMD_PAYLOAD, 0xA5)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+
+    await step(dut)
+    assert uo_nibble(dut) == 0xA
+    assert ((uo(dut) >> 4) & 1) == 0
+    await step(dut)
+    assert uo_nibble(dut) == 0x5
+    assert ((uo(dut) >> 4) & 1) == 1
+    await step(dut)
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_qspi_in_and_autopull(dut):
+    await boot(dut)
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0x40)
+    await load_bytes(dut, 0x4C, [0x44])  # width 4, base ui[4]
+    await load_words(dut, QSPI_IN)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+
+    dut.ui_in.value = 0xA0
+    await step(dut)
+    dut.ui_in.value = 0x50
+    await step(dut)
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert await read_shift(dut) == 0xA5
+
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0xA4)  # MSB, autopull, xreload 4
+    await load_bytes(dut, 0x4C, [0x48])
+    await load_words(dut, QSPI_GROUPS)
+    await pulse(dut, CMD_PAYLOAD, 0xA5)
+    await pulse(dut, CMD_PUSH, 0x3C)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)  # HOLD reloads x
+    got = []
+    for _ in range(4):
+        await step(dut)
+        got.append(uo_nibble(dut))
+    await step(dut)
+    assert got == [0xA, 0x5, 0x3, 0xC]
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_dual_shift(dut):
+    await boot(dut)
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0x84)  # MSB, xreload 4
+    await load_bytes(dut, 0x4C, [0x28])  # width 2, base pin 8
+    await load_words(dut, QSPI_GROUPS)
+    await pulse(dut, CMD_PAYLOAD, 0xA5)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    got = []
+    for _ in range(4):
+        await step(dut)
+        got.append(uo(dut) & 0x3)
+    assert got == [0b10, 0b10, 0b01, 0b01]
 

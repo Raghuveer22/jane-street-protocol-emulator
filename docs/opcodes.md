@@ -30,6 +30,7 @@ CMD_POP     7   dequeue one byte from the RX FIFO onto uio. legal while running
 | `0x46`–`0x49` | role 0–3 binding |
 | `0x4A` | side-pin binding |
 | `0x4B` | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` |
+| `0x4C` | shift width and the base pin. Absent means width 1 |
 
 A protocol load is `CMD_ADDR 0x40` plus twelve writes, then `CMD_ADDR 0x00` plus two writes per word. A later frame of the same protocol is three ticks: `CMD_PAYLOAD`, `CMD_PC`, `CMD_RUN`. After a receive or a full-duplex transfer, `CMD_READ` returns the assembled byte.
 
@@ -69,7 +70,11 @@ OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
 OP_HOLD    0x7  change no pin, only load the wait
 ```
 
-`OP_SHIFT` and `OP_ODSHIFT` consume one bit of the output shift. `OP_IN` shifts one sampled bit in. Bit order is `out_dir` / `in_dir` from the load map: 0 is bit 0 first, 1 is bit 7 first.
+`OP_SHIFT` and `OP_ODSHIFT` consume one, two, or four bits of the output shift. `OP_IN` shifts that many sampled bits in. Width 1, the reset value, drives or samples the role pin. Width 2 or 4 uses consecutive pins at the base in `0x4C`, and the low pin of the group is the low bit of that group. Bit order is `out_dir` / `in_dir`: 0 sends the low group first, 1 sends the high group first. A group has to sit inside one port. Pin 15 is `running`, so four bits cannot cross from `uo` into `uio`. `uo[6:0]` and `uio[7:0]` and `ui[7:0]` can each hold one.
+
+Byte `0x4C` is `{0, width[1:0], base[4:0]}`. `width` 0 is one bit, 1 is two, 2 is four. A twelve-byte config load stops at `0x4B` and leaves this at one bit.
+
+Autopull and autopush count bits. A quad shift empties the byte in two instructions.
 
 `side` is allowed on `OP_SET`, `OP_SHIFT`, `OP_IN`, `OP_OD`, and `OP_ODSHIFT`. The data pin and the side pin update together, then the hold runs.
 
