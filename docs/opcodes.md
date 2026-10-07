@@ -1,6 +1,6 @@
 # Commands and opcodes
 
-The host loads a program with six commands. The program is 16-bit words. The opcode is the high nibble of each word. The full encoding, the load map, and the four example programs are in `docs/instruction_definition.html`.
+The host loads a program with eight commands. The program is 16-bit words. The opcode is the high nibble of each word. The full encoding, the load map, and the UART, SPI, and I2C listings are in `docs/instruction_definition.html`. Streaming, quad-shift, and low-speed USB programs in the same word format are in `prog/`.
 
 Config and payload writes take while `running` is 0. Instruction-memory writes also take while `running` is 1, and those land in the idle bank. The strobe is `ui[0]` for one tick. The command is `ui[3:1]`. The data byte is `uio[7:0]`.
 

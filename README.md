@@ -29,7 +29,9 @@ This folder is the [Tiny Tapeout CMOS5L Verilog template](https://github.com/Tin
 
 ## Where the RTL is
 
-`src/pin_engine.v` is two banks of 32 16-bit words. The engine runs one bank. While that bank runs, the host can fill the other, then arm a switch that takes effect on `HALT` or at the end of the bank. UART transmit, UART receive, SPI mode 0, and I2C master are programs in `prog/`, not Verilog blocks. The host loads them through six commands. `uo[7]` is `running`. A toggle program in the test keeps this from turning into a fixed UART block. The top `tt_um_posamokshith_proto` is the Tiny Tapeout pinout (`info.yaml`, 6×4 tiles).
+`src/pin_engine.v` is two banks of 32 16-bit words. The engine runs one bank. While that bank runs, the host can fill the other, then arm a switch that takes effect on `HALT` or at the end of the bank. The host loads programs through eight commands (`CMD_ADDR` through `CMD_POP`). `uo[7]` is `running`. A toggle program in the test keeps this from turning into a fixed UART block. The top `tt_um_posamokshith_proto` is the Tiny Tapeout pinout (`info.yaml`, 6×4 tiles).
+
+Programs in `prog/` are firmware, not Verilog blocks: UART transmit and receive (and their stream forms), SPI mode 0 (and its stream form), I2C master, a quad-shift nibble transfer, and low-speed USB transmit.
 
 Install the template's test tools, then run the suite. `test/tb.v` wraps the top, which is what `.github/workflows/test.yaml` runs:
 
@@ -40,7 +42,7 @@ cd test && make -B
 
 `src/config.json` is the template OpenLane config (50 MHz). `.github/workflows/` is the template's test, GDS, docs, and FPGA actions. They run on push because this repository root is the Tiny Tapeout project.
 
-The problem is `docs/info.md`. The instruction word and the host command map are in `docs/instruction_definition.html`. How the engine applies them is `docs/pin_engine.md`.
+The problem is `docs/info.md`. The instruction word and the host command map are in `docs/instruction_definition.html`. How the engine applies them is `docs/pin_engine.md`. One UART byte from host write to the TX pin is `docs/uart_flow.md`.
 
 Questions: asic-competition@janestreet.com
 

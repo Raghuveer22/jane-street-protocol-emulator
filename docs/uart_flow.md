@@ -23,30 +23,58 @@ Each of those ten columns lasts `T` clocks. After the stop bit the pin is alread
 | --- | --- |
 | `ui[0]` | Write strobe, one clock |
 | `ui[3:1]` | Command |
-| `uio[7:0]` | Write data, while stopped |
+| `uio[7:0]` | Write data. While stopped: config and payload. While running: TX FIFO push data |
 | `uo[0]` | TX, once role 0 is bound to pin 8 |
 | `uo[7]` | `running` |
 
-A host write is accepted only while `running` is 0.
+Config and payload writes take while `running` is 0. While running, instruction-memory stores go to the idle bank, byte `0x4D` is still accepted, and `CMD_PUSH` / `CMD_POP` move a FIFO byte.
 
-## The program
+## Host load, then the program
 
-`prog/uart_8n1.asm` is four words. Role 0 is TX. `xreload` is 8. Bit 0 goes first.
+Commands are `ui[3:1]`. The data byte is `uio`. Each line is one tick with the strobe set. This load uses `T = 4` so the forty-clock walk-through below stays short. The same shape with `T = 5208` is in `docs/instruction_definition.html`.
+
+| Command | Data | Effect |
+| --- | --- | --- |
+| `CMD_ADDR` | `0x40` | Load address = config |
+| `CMD_WRITE` | `0x04` | `T[7:0]` |
+| `CMD_WRITE` | `0x00` | `T[15:8]`. `T = 4` |
+| `CMD_WRITE` | `0x00` | `Tlo`, unused |
+| `CMD_WRITE` | `0x00` | |
+| `CMD_WRITE` | `0x00` | `Thi`, unused |
+| `CMD_WRITE` | `0x00` | |
+| `CMD_WRITE` | `0x68` | Role 0 = TX on `uo[0]` |
+| `CMD_WRITE` | `0x00` | Role 1 unused |
+| `CMD_WRITE` | `0x00` | Role 2 unused |
+| `CMD_WRITE` | `0x00` | Role 3 unused |
+| `CMD_WRITE` | `0x00` | Side unused |
+| `CMD_WRITE` | `0x08` | Address `0x4B`: bit 0 first, `xreload = 8` |
+| `CMD_ADDR` | `0x00` | Load address = `imem` |
+| `CMD_WRITE` | `0x01` | Word 0, low |
+| `CMD_WRITE` | `0x20` | Word 0 = `0x2001` |
+| `CMD_WRITE` | `0x08` | Word 1, low |
+| `CMD_WRITE` | `0x30` | Word 1 = `0x3008` |
+| `CMD_WRITE` | `0x00` | Word 2, low |
+| `CMD_WRITE` | `0x22` | Word 2 = `0x2200` |
+| `CMD_WRITE` | `0x00` | Word 3, low |
+| `CMD_WRITE` | `0x00` | Word 3 = `0x0000` |
+| `CMD_PAYLOAD` | `0xA5` | Output shift = `0xA5` |
+| `CMD_PC` | `0x00` | `pc = 0` |
+| `CMD_RUN` | `0x00` | `running = 1`. Frame starts next tick |
+
+`setx` on the start bit does not encode 8. It copies `xreload` from the `CMD_WRITE 0x08` into address `0x4B`.
+
+`prog/uart_8n1.asm` is the four words just loaded. Role 0 is TX. Bit 0 goes first.
 
 | `pc` | Word | Instruction | Bit it produces |
 | --- | --- | --- | --- |
-| 0 | `0x2001` | `SET` 0, hold `T`, `setx` | start. `x = 8` |
+| 0 | `0x2001` | `SET` 0, hold `T`, `setx` | start. `x ← xreload` (8) |
 | 1 | `0x3008` | `SHIFT`, hold `T`, `xdec`, `back` 0 | one data bit, then this word again while `x > 0` |
 | 2 | `0x2200` | `SET` 1, hold `T` | stop |
 | 3 | `0x0000` | `HALT` | TX stays 1 |
 
 `SHIFT` drives TX from bit 0 of the output shift, then shifts that register right by one.
 
-## Load, then run
-
-Commands are `ui[3:1]`. The data byte is `uio`. The binding and `T` are bytes at `0x40` and up, written with `CMD_ADDR` then `CMD_WRITE`. One later byte is three ticks: `CMD_PAYLOAD`, `CMD_PC` 0, `CMD_RUN`.
-
-`CMD_RUN` does not execute `imem[0]`. That instruction runs on the next rising clock. From then until `HALT`, a config or payload write is dropped. An instruction-memory write during the run goes to the other bank.
+`CMD_RUN` does not execute `imem[0]`. That instruction runs on the next rising clock. From then until `HALT`, a config or payload write is dropped (except byte `0x4D`). An instruction-memory write during the run goes to the other bank. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock.
 
 On the clock a `SET` or `SHIFT` runs, `wait_left` is loaded with `T - 1`. A stored `T` of 0 holds for 1 clock. One execute clock plus `T - 1` countdown clocks is `T` clocks at the new level.
 

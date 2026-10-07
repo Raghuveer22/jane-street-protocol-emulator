@@ -98,6 +98,7 @@ The programs:
 | `prog/uart_8n1_stream.asm` | Transmit frames back to back from the TX FIFO |
 | `prog/uart_rx_stream.asm` | Receive frames back to back into the RX FIFO |
 | `prog/spi_mode0_stream.asm` | Master, CS held, bytes from the FIFOs |
+| `prog/qspi_nibble.asm` | Two width-4 shifts with the side pin as SCK |
 | `prog/usb_ls_tx.asm` | Low-speed USB packet. `XOR`, `JMP`, programmable stuff length |
 
 `prog/asm.py` assembles those mnemonics to one word per line.
@@ -111,6 +112,4 @@ source .venv/bin/activate
 cd test && make -B
 ```
 
-`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, config writes dropped while running, reset clearing `imem` back to `HALT`, back-to-back UART and SPI through the FIFOs, a bank handoff on `HALT` and on the step off word 31, and a low-speed USB packet that checks the differential complement, SE0, and a stuff length set by `yreload`. The toggle program is there so a passing test means the waveform came from `imem`.
-
-`make -f Makefile.uart` in `test/` is the longer UART transmitter bench. It assembles `prog/uart_8n1.asm` and checks the wire at several bit times, including 434 and 5208.
+`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, config writes dropped while running, reset clearing `imem` back to `HALT`, back-to-back UART and SPI through the FIFOs, a bank handoff on `HALT` and on the step off word 31, quad and dual shifts, and a low-speed USB packet that checks the differential complement, SE0, and a stuff length set by `yreload`. The toggle program is there so a passing test means the waveform came from `imem`.

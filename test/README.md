@@ -1,11 +1,8 @@
-# Sample testbench for a Tiny Tapeout project
+# Pin engine tests
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+[cocotb](https://docs.cocotb.org/en/stable/) drives the Tiny Tapeout top and checks the pins. See also the [Tiny Tapeout testing guide](https://tinytapeout.com/hdl/testing/).
 
-## Setting up
-
-This harness already points at the protocol emulator:
+## Layout
 
 - `PROJECT_SOURCES` is `pin_engine.v project.v`
 - `tb.v` instantiates `tt_um_posamokshith_proto`
@@ -13,37 +10,35 @@ This harness already points at the protocol emulator:
 
 ## How to run
 
-To run the RTL simulation:
+From this directory, with the virtualenv that has the packages in `requirements.txt`:
 
 ```sh
 make -B
 ```
 
-To run gatelevel simulation, first harden your project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`.
+That runs `test_pin_engine.py`: UART TX/RX, SPI mode 0, I2C master, streaming FIFOs, bank handoff, quad and dual shifts, and low-speed USB transmit.
 
-Then run:
+To run gate-level simulation, first harden the project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`, then:
 
 ```sh
 make -B GATES=yes
 ```
 
-If you wish to save the waveform in VCD format instead of FST format, edit tb.v to use `$dumpfile("tb.vcd");` and then run:
+For a VCD waveform instead of FST, edit `tb.v` to use `$dumpfile("tb.vcd");` and run:
 
 ```sh
 make -B FST=
 ```
 
-This will generate `tb.vcd` instead of `tb.fst`.
+## How to view the waveform
 
-## How to view the waveform file
-
-Using GTKWave
+GTKWave:
 
 ```sh
 gtkwave tb.fst tb.gtkw
 ```
 
-Using Surfer
+Surfer:
 
 ```sh
 surfer tb.fst
