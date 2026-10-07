@@ -13,9 +13,10 @@ CMD_PAYLOAD 2   output shift register (the byte to send)
 CMD_PC      3   first instruction of this run
 CMD_RUN     4   running = 1, data ignored
 CMD_READ    5   present the input shift on uio for one tick
+CMD_BUF     6   present rx_buf[ui[7:4]] on uio for one tick
 ```
 
-6 and 7 are unused. `CMD_READ` is only legal while stopped. It drives `uio` as an output for that tick. The instruction at `pc` runs on the tick after `CMD_RUN`.
+7 is unused. `CMD_READ` and `CMD_BUF` are only legal while stopped. Each drives `uio` as an output for that tick. The byte index for `CMD_BUF` is `ui[7:4]`, because `uio` cannot be the index and the result on the same tick. The instruction at `pc` runs on the tick after `CMD_RUN`.
 
 `CMD_ADDR` / `CMD_WRITE` walk a flat byte space:
 
@@ -28,6 +29,8 @@ CMD_READ    5   present the input shift on uio for one tick
 | `0x46`–`0x49` | role 0–3 binding |
 | `0x4A` | side-pin binding |
 | `0x4B` | `out_dir`, `in_dir`, `xreload` |
+| `0x4C` | `pkt_len`, 1 to 16. Longer values clamp to 16 |
+| `0x50`–`0x5F` | USB transmit bytes. The host writes sync, PID, data, and CRC |
 
 A protocol load is `CMD_ADDR 0x40` plus twelve writes, then `CMD_ADDR 0x00` plus two writes per word. A later frame of the same protocol is three ticks: `CMD_PAYLOAD`, `CMD_PC`, `CMD_RUN`. After a receive or a full-duplex transfer, `CMD_READ` returns the assembled byte.
 
@@ -42,7 +45,11 @@ OP_IN      0x4  sample role into the input shift
 OP_OD      0x5  pull or release role. val 0 pulls, val 1 releases
 OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
 OP_HOLD    0x7  change no pin, only load the wait
+OP_USB_OUT 0x8  NRZI bit from the packet buffer onto D+ and not-D+
+OP_USB_IN  0x9  sample NRZI from D+, drop a stuff bit, stop on SE0
 ```
+
+`OP_USB_OUT` and `OP_USB_IN` drive or sample D+ on the role pin and D− on the side pin. D− is the complement of D+ during a bit, and `side_val` is ignored. A 0 toggles the pair. A 1 keeps it. After six 1s the engine inserts, or drops, one extra 0 and does not take it from the buffer. `OP_USB_OUT` falls through when `pkt_len` bytes have been sent. `OP_USB_IN` falls through when both pins read 0, and that sample is not stored. `CMD_RUN` clears the NRZI state, so a transmit program sets idle J (D+ low, D− high) before the first `OP_USB_OUT`.
 
 `OP_SHIFT` and `OP_ODSHIFT` consume one bit of the output shift. `OP_IN` shifts one sampled bit in. Bit order is `out_dir` / `in_dir` from the load map: 0 is bit 0 first, 1 is bit 7 first.
 
@@ -78,7 +85,7 @@ Unused fields are 0.
 
 Shift out (`OP_SHIFT`, `OP_ODSHIFT`), shift in (`OP_IN`), a second pin on the same tick (`side`), six hold lengths, a loop of `xreload` bits (`setx` / `xdec` / `back`), stall (`OP_WAIT`), pull/release (`OP_OD`), and halt with the pins held (`OP_HALT`).
 
-No forward jump. No branch on the bit just sampled. Two pins per step, not three. One byte per shift register per run.
+No forward jump. No branch on the bit just sampled. Two pins per step, not three. One byte per shift register per run. A USB packet is the exception: up to 16 bytes stay in the packet buffer so the bit times are not broken by a halt.
 
 ## SPI: as many slaves as the ASIC pins allow
 

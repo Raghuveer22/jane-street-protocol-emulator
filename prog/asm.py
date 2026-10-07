@@ -12,6 +12,8 @@ Fields the line omits are 0. `side` is a flag. `setx` and `xdec` are flags.
     OD role=0 val=pull side side_val=release hold=Tlo
     ODSHIFT role=0 side side_val=pull hold=Tlo
     HOLD hold=T/2 setx
+    USB_OUT side hold=T
+    USB_IN side hold=T
     .word 0x2001
 
 hold is T, T/2, Tlo, Thi, 1, or none. val is 0, 1, pull, or release.
@@ -30,6 +32,8 @@ OPS = {
     "OD": 0x5,
     "ODSHIFT": 0x6,
     "HOLD": 0x7,
+    "USB_OUT": 0x8,
+    "USB_IN": 0x9,
 }
 
 HOLDS = {

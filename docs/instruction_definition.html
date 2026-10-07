@@ -82,7 +82,7 @@
       </thead>
       <tbody>
         <tr><td><code>ui[0]</code></td><td>Write strobe. 1 for exactly one tick, then 0.</td></tr>
-        <tr><td><code>ui[3:1]</code></td><td>Command number. Three bits, eight slots. Six are used.</td></tr>
+        <tr><td><code>ui[3:1]</code></td><td>Command number. Three bits, eight slots. Seven are used.</td></tr>
         <tr><td><code>uio[7:0]</code></td><td>Data byte for that command. During a run these pins can be protocol wires, because load and run never share a tick.</td></tr>
       </tbody>
     </table>
@@ -91,9 +91,10 @@ localparam [2:0] CMD_WRITE   = 3'd1;  // store one byte there, then address + 1
 localparam [2:0] CMD_PAYLOAD = 3'd2;  // output shift register
 localparam [2:0] CMD_PC      = 3'd3;  // first instruction of this run
 localparam [2:0] CMD_RUN     = 3'd4;  // running = 1, data ignored
-localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one tick</pre>
-    <p>Two command numbers, 6 and 7, are spare. A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 also changes nothing, except that <code>CMD_READ</code> is only legal while the machine is stopped.</p>
-    <p><code>CMD_READ</code> turns <code>uio</code> into an output for that one tick and drives the input shift register onto it. Every other stopped tick, and every running tick that is not using <code>uio</code> as a protocol wire, leaves those pins as inputs.</p>
+localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one tick
+localparam [2:0] CMD_BUF     = 3'd6;  // present rx_buf[ui[7:4]] on uio for one tick</pre>
+    <p>Command 7 is spare. A tick with the strobe at 0 changes nothing. A tick with the strobe at 1 while <code>running</code> is 1 also changes nothing. <code>CMD_READ</code> and <code>CMD_BUF</code> are only legal while the machine is stopped.</p>
+    <p><code>CMD_READ</code> turns <code>uio</code> into an output for that one tick and drives the input shift register onto it. <code>CMD_BUF</code> does the same with one byte of the USB receive buffer. The index is <code>ui[7:4]</code>, because <code>uio</code> cannot carry the index and the byte on the same tick. Every other stopped tick, and every running tick that is not using <code>uio</code> as a protocol wire, leaves those pins as inputs.</p>
     <p>The instruction at <code>pc</code> executes on the tick after the write that sets <code>running</code>. That write itself is still a load tick.</p>
     <p>The other way to expose the same fields is one command number each, with no address register: three wait registers as six byte writes, five pin bindings, the direction byte, an instruction-memory pointer, an instruction-memory write, the payload, the program counter, run, and read. That is sixteen commands. Sixteen needs <code>ui[4:1]</code>. The six-command map keeps the three-bit field and puts the twelve config bytes behind <code>CMD_ADDR</code> and <code>CMD_WRITE</code>, the same path the instruction words already use.</p>
 
@@ -111,6 +112,8 @@ localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one 
         <tr><td><code>0x46</code>–<code>0x49</code></td><td>Role 0 to role 3, one binding byte each.</td></tr>
         <tr><td><code>0x4A</code></td><td>The side pin, same binding byte.</td></tr>
         <tr><td><code>0x4B</code></td><td>Shift directions and the loop reload.</td></tr>
+        <tr><td><code>0x4C</code></td><td><code>pkt_len</code>. How many USB transmit bytes this run uses, from 1 to 16. A larger value is clamped to 16.</td></tr>
+        <tr><td><code>0x50</code>–<code>0x5F</code></td><td>USB transmit buffer. The host writes the sync byte, the PID, the data, and the CRC. The engine applies NRZI and bit stuffing.</td></tr>
       </tbody>
     </table>
     <p>A binding byte is <code>{mode[1:0], idle, pin[4:0]}</code>.</p>
@@ -175,7 +178,7 @@ localparam [2:0] CMD_READ    = 3'd5;  // present the input shift on uio for one 
     <p>The next byte on the same program is three ticks: the new payload, <code>pc = 0</code>, run. The twelve config bytes and the four instruction words stay.</p>
 
     <h2>Opcodes</h2>
-    <p>Eight operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, and hold.</p>
+    <p>Ten operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, hold, and the two USB operations.</p>
 <pre>localparam [3:0] OP_HALT    = 4'h0;  // running = 0. Pins stay.
 localparam [3:0] OP_WAIT    = 4'h1;  // stall until role reads val
 localparam [3:0] OP_SET     = 4'h2;  // drive role to val, push-pull
@@ -183,7 +186,9 @@ localparam [3:0] OP_SHIFT   = 4'h3;  // drive role to the next payload bit, push
 localparam [3:0] OP_IN      = 4'h4;  // sample role into the input shift
 localparam [3:0] OP_OD      = 4'h5;  // pull or release role. val 0 pulls, val 1 releases
 localparam [3:0] OP_ODSHIFT = 4'h6;  // payload bit 0 pulls role, bit 1 releases it
-localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
+localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait
+localparam [3:0] OP_USB_OUT = 4'h8;  // NRZI bit from the packet buffer onto D+ and not-D+
+localparam [3:0] OP_USB_IN  = 4'h9;  // sample NRZI from D+, drop a stuff bit, stop on SE0</pre>
     <p><code>OP_SHIFT</code> and <code>OP_ODSHIFT</code> consume one bit of the output shift. The bit taken is the one <code>out_dir</code> names. <code>OP_IN</code> assembles bits in the order <code>in_dir</code> names.</p>
     <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, and <code>OP_ODSHIFT</code>. The data pin and the side pin update together, then the hold runs. A pin the word does not write keeps its level.</p>
 
@@ -333,6 +338,23 @@ op   role val side side_val hold xdec back setx
     </table>
     <p>A second data byte repeats addresses 2 through 10. Halting after address 10 leaves SCL pulled, which holds the bus. Address 10 also reloads <code>x</code>, because the bit loop leaves it at 0. The host writes the next payload, sets the program counter to 2, and runs. Address 11, the stop, runs after the last byte.</p>
 
+    <h2>USB low-speed</h2>
+    <p><code>T = 33</code> is about 1.515 Mbit/s on a 50 MHz clock, inside the low-speed tolerance. <code>T/2</code> of that is 16 ticks, which still lands inside the bit. Full-speed, 12 Mbit/s, has no integer <code>T</code>. CRC, enumeration, and the 1.5 kΩ pull-up stay off the chip. The host writes them into the buffer; the engine only encodes the wire.</p>
+    <p>Role 0 is D+ and the side pin is D−, both push-pull. <code>OP_USB_OUT</code> and <code>OP_USB_IN</code> drive D− to the complement of D+ and ignore <code>side_val</code>. They do not use the loop counter. <code>CMD_RUN</code> clears the last D+ level to 0, so the transmit program sets idle J before the first packet bit. Idle J is D+ low and D− high. A data 0 toggles the pair. A data 1 keeps it. After six 1s the engine spends one extra bit time on a 0, and that bit is not another data bit. On receive, the bit after six 1s is dropped. Both pins reading 0 is SE0: it is not stored, and <code>OP_USB_IN</code> falls through.</p>
+    <p>Sync is data. From idle J, the byte <code>0x80</code> sent least-significant bit first is seven 0s and a 1, which is KJKJKJKK on D+. The transmit program is idle J, <code>OP_USB_OUT</code> for the whole buffer, two bit times of SE0, then J again. The receive program waits until D+ reads 1, holds <code>T/2</code>, then <code>OP_USB_IN</code> until SE0. After halt, <code>CMD_BUF</code> with the index on <code>ui[7:4]</code> returns that byte. <code>CMD_READ</code> is still the one-byte shift used by UART, SPI, and I2C.</p>
+<pre>SET role=0 val=0 side side_val=1 hold=T    ; 0x2180  idle J
+USB_OUT side hold=T                         ; 0x8100  until pkt_len bytes are sent
+SET role=0 val=0 side side_val=0 hold=T     ; 0x2100  SE0
+SET role=0 val=0 side side_val=0 hold=T     ; 0x2100  SE0
+SET role=0 val=0 side side_val=1 hold=T     ; 0x2180  J
+HALT
+
+WAIT role=0 val=1 hold=none                 ; 0x1250  D+ leaves J
+HOLD hold=T/2                               ; 0x7010
+USB_IN side hold=T                          ; 0x9100  until SE0
+HALT</pre>
+    <p>D+ transmit is pin 8, push-pull, idle 0 (<code>0x48</code>). D− transmit is pin 9, push-pull, idle 1 (<code>0x69</code>). Receive uses <code>ui[4]</code> and <code>ui[5]</code> (<code>0x04</code> and <code>0x05</code>). <code>uo[7]</code> stays <code>running</code>.</p>
+
     <h2>Why 16 bits, not 8</h2>
     <p>The fields above add up to 16. Four are the opcode. The other twelve are what one SPI or I2C step has to say at once: which data pin, the level or the pull, whether the clock pin changes on that same tick, which wait to load, and whether the loop repeats.</p>
     <table>
@@ -340,7 +362,7 @@ op   role val side side_val hold xdec back setx
         <tr><th>Field</th><th>Bits</th><th>Why it is in the word</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>op</code></td><td>4</td><td>Eight operations. Three bits would also cover eight operations.</td></tr>
+        <tr><td><code>op</code></td><td>4</td><td>Ten operations. Three bits cover the original eight. The fourth bit is what leaves room for the USB pair.</td></tr>
         <tr><td><code>role</code></td><td>2</td><td>SPI touches MOSI, CS, and MISO. One configured data pin cannot name all three.</td></tr>
         <tr><td><code>val</code></td><td>1</td><td>The driven level, the level to wait for, or pull versus release.</td></tr>
         <tr><td><code>side</code>, <code>side_val</code></td><td>2</td><td>The clock beside the data. At one tick low and one tick high, this cannot be a later instruction.</td></tr>

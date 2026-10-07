@@ -14,6 +14,7 @@ CMD_PAYLOAD = 2
 CMD_PC = 3
 CMD_RUN = 4
 CMD_READ = 5
+CMD_BUF = 6
 
 # UART sender: start, eight data bits, stop, halt.
 UART_TX = [0x2001, 0x3008, 0x2200, 0x0000]
@@ -41,6 +42,13 @@ SDA = 0xB0      # uio[0], open-drain, idle released
 SCL = 0xB1      # uio[1], open-drain, idle released
 LSB8 = 0x08     # bit 0 first, xreload 8
 MSB8 = 0xC8     # bit 7 first, both directions, xreload 8
+# USB low-speed. D+ is role 0, D- is the side pin.
+DP_TX = 0x48    # uo[0], push-pull, idle 0 (J)
+DM_TX = 0x69    # uo[1], push-pull, idle 1 (J)
+DP_RX = 0x04    # ui[4], input
+DM_RX = 0x05    # ui[5], input
+USB_TX = [0x2180, 0x8100, 0x2100, 0x2100, 0x2180, 0x0000]
+USB_RX = [0x1250, 0x7010, 0x9100, 0x0000]
 
 
 def uo(dut):
@@ -99,6 +107,64 @@ async def load_words(dut, words):
 async def load_cfg(dut, t=1, tlo=1, thi=1, roles=(0, 0, 0, 0), side=0, dirs=LSB8):
     blob = u16(t) + u16(tlo) + u16(thi) + list(roles) + [side, dirs]
     await load_bytes(dut, 0x40, blob)
+
+
+async def read_buf(dut, index):
+    dut.ui_in.value = 1 | (CMD_BUF << 1) | ((index & 0xF) << 4)
+    await Timer(1, unit="ns")
+    assert int(dut.uio_oe.value) == 0xFF
+    value = int(dut.uio_out.value) & 0xFF
+    await step(dut)
+    dut.ui_in.value = 0
+    await Timer(1, unit="ns")
+    return value
+
+
+def usb_levels(data):
+    """NRZI D+ levels for a low-speed packet, including the stuff bits."""
+    bits = []
+    for byte in data:
+        bits.extend((byte >> i) & 1 for i in range(8))
+    stuffed = []
+    ones = 0
+    for bit in bits:
+        stuffed.append(bit)
+        if bit == 1:
+            ones += 1
+            if ones == 6:
+                stuffed.append(0)
+                ones = 0
+        else:
+            ones = 0
+    level = 0
+    wave = []
+    for bit in stuffed:
+        if bit == 0:
+            level ^= 1
+        wave.append(level)
+    return wave
+
+
+def usb_tx_wave(data, period):
+    wave = [(0, 1)] * period
+    for bit in usb_levels(data):
+        wave.extend([(bit, 1 - bit)] * period)
+    wave.extend([(0, 0)] * (2 * period))
+    wave.extend([(0, 1)] * period)
+    return wave
+
+
+async def capture_pairs(dut, limit):
+    await pulse(dut, CMD_RUN, 0)
+    samples = []
+    for _ in range(limit):
+        await step(dut)
+        if busy_of(dut) == 0:
+            break
+        samples.append((uo(dut) & 1, (uo(dut) >> 1) & 1))
+    else:
+        raise AssertionError("USB transmit did not halt")
+    return samples
 
 
 async def read_shift(dut):
@@ -445,3 +511,56 @@ async def transfer_i2c(dut, byte, ack, stretch, full_stop=True, pc=0):
         "data": data_bits,
         "cycles": cycles,
     }
+
+
+async def load_usb_tx(dut, data, period):
+    await load_cfg(dut, t=period, roles=(DP_TX, 0, 0, 0), side=DM_TX)
+    await load_words(dut, USB_TX)
+    await load_bytes(dut, 0x4C, [len(data)])
+    await load_bytes(dut, 0x50, list(data))
+    await pulse(dut, CMD_PC, 0)
+
+
+@cocotb.test()
+async def test_usb_ls_tx_stuff(dut):
+    """Six 1s insert one extra transition, and D- is the complement until SE0."""
+    packet = [0x80, 0xFF]
+    await boot(dut)
+    await load_usb_tx(dut, packet, period=8)
+    samples = await capture_pairs(dut, limit=2000)
+    assert samples == usb_tx_wave(packet, 8)
+    assert busy_of(dut) == 0
+    # Back at J. SE0 was both pins low, and it is not the resting level.
+    assert samples[-1] == (0, 1)
+    assert (0, 0) in samples
+
+
+@cocotb.test()
+async def test_usb_ls_tx_period_33(dut):
+    """T = 33 is the low-speed bit time. A byte of zeros is eight toggles."""
+    await boot(dut)
+    await load_usb_tx(dut, [0x00], period=33)
+    samples = await capture_pairs(dut, limit=2000)
+    assert samples == usb_tx_wave([0x00], 33)
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_usb_ls_rx_roundtrip(dut):
+    """The transmit waveform, played back, stores the same bytes. SE0 ends it."""
+    packet = [0x80, 0xFF]
+    await boot(dut)
+    await load_usb_tx(dut, packet, period=8)
+    wire = await capture_pairs(dut, limit=2000)
+
+    await load_cfg(dut, t=8, roles=(DP_RX, 0, 0, 0), side=DM_RX)
+    await load_words(dut, USB_RX)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    for dp, dm in wire:
+        dut.ui_in.value = ((dp & 1) << 4) | ((dm & 1) << 5)
+        await step(dut)
+    assert busy_of(dut) == 0, "SE0 should have ended the receive before the wire went idle"
+    assert await read_buf(dut, 0) == packet[0]
+    assert await read_buf(dut, 1) == packet[1]
+    assert await read_buf(dut, 2) == 0, "SE0 is not stored"
