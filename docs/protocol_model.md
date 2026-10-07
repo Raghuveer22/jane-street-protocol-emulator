@@ -148,7 +148,7 @@ where `q'` is the next state. A run step executes one instruction of `ρ` at the
 running(t) = 1    implies    ρ(t) = ρ(0)
 ```
 
-A host write at tick `t` is applied to `q` only when `running(t) = 0`. That is the separation between the agreement `ρ` and the payload. Both cross the same pins. They are different fields of `q`, and the running bit says which field a write may touch.
+A host write of the program or the timing registers at tick `t` is applied to `q` only when `running(t) = 0`. That is the separation between the agreement `ρ` and the payload. Both cross the same pins. They are different fields of `q`, and the running bit says which field a write may touch. A push or pop of the byte FIFOs is a payload write: it is applied while `running` is 1, and it does not change `ρ`.
 
 The engine in `src/pin_engine.v` uses this hold for every pin write. On the tick a step with hold length `T` executes, it sets the pins and loads
 

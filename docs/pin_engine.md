@@ -12,7 +12,8 @@ The host is the test, or later a controller on the board. It fills the interpret
 | `pc` | 5 bits | Index into `imem` |
 | `T`, `Tlo`, `Thi` | 16 bits each | The hold lengths a step can name. `T/2` is `T` shifted right by 1 |
 | roles 0–3, side | one byte each | Which pin, how it is driven, and the idle level |
-| `out_dir`, `in_dir`, `xreload` | packed in one byte | Bit order of the two shift registers, and the value `setx` loads |
+| `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` | packed in one byte | Bit order, FIFO refill, and the value `setx` loads |
+| TX FIFO, RX FIFO | 4 bytes each | Bytes queued ahead of the shift registers |
 | output shift | 8 bits | The payload byte |
 | input shift | 8 bits | The byte assembled from sampled pins |
 | `x` | 4 bits | Loop counter |
@@ -43,7 +44,7 @@ The opcode is the high nibble of the instruction word.
 
 `side` on `SET`, `SHIFT`, `IN`, `OD`, and `ODSHIFT` writes the side pin on that same tick. A hold length of 0 is stored as a hold of 1. The hold counter is loaded with `ticks - 1` on the clock the instruction runs, so the level lasts `ticks` clocks. `hold = none` and `hold = 1` both last one clock.
 
-The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, host writes are dropped. `CMD_RUN` clears the input shift.
+The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, config and payload writes are dropped. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock, and a push does not steal a tick from a hold. `CMD_RUN` clears the input shift.
 
 ## Pins
 
@@ -69,10 +70,12 @@ Push-pull drives 0 and 1. Open-drain pull sets the enable and drives 0. Open-dra
 | --- | --- |
 | 0 `CMD_ADDR` | Load address |
 | 1 `CMD_WRITE` | Store one byte there, then the address increments |
-| 2 `CMD_PAYLOAD` | Output shift register |
+| 2 `CMD_PAYLOAD` | Output shift register. Ignored while running |
 | 3 `CMD_PC` | First instruction of this run. Five bits |
 | 4 `CMD_RUN` | `running = 1`. Data is ignored |
-| 5 `CMD_READ` | While stopped, drive the input shift onto `uio` for that tick |
+| 5 `CMD_READ` | Stopped: input shift on `uio`. Running: FIFO status on `uio` |
+| 6 `CMD_PUSH` | Enqueue one TX byte. Legal while running |
+| 7 `CMD_POP` | Dequeue one RX byte onto `uio`. Legal while running |
 
 `CMD_ADDR` / `CMD_WRITE` walk a flat byte space. `0x00`–`0x3F` is `imem`, low byte then high byte. `0x40`–`0x4B` is `T`, `Tlo`, `Thi`, the five bindings, and the direction byte. The map is in `docs/opcodes.md`.
 
@@ -84,6 +87,9 @@ The programs:
 | `prog/uart_rx.asm` | Receive. Start edge, sample the middle of each bit |
 | `prog/spi_mode0.asm` | Master. MOSI out, MISO in, on the rising clock |
 | `prog/i2c_master.asm` | Master. Start, eight bits, acknowledgement, stop |
+| `prog/uart_8n1_stream.asm` | Transmit frames back to back from the TX FIFO |
+| `prog/uart_rx_stream.asm` | Receive frames back to back into the RX FIFO |
+| `prog/spi_mode0_stream.asm` | Master, CS held, bytes from the FIFOs |
 
 `prog/asm.py` assembles those mnemonics to one word per line.
 
@@ -96,6 +102,6 @@ source .venv/bin/activate
 cd test && make -B
 ```
 
-`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, host writes dropped while running, and reset clearing `imem` back to `HALT`. The toggle program is there so a passing test means the waveform came from `imem`.
+`test/test_pin_engine.py` checks UART frames, a receiver, an SPI transfer, an I2C exchange with an acknowledgement and a stretched clock, a second I2C byte that leaves SCL pulled, a toggle program, config writes dropped while running, reset clearing `imem` back to `HALT`, and back-to-back UART and SPI through the FIFOs. The toggle program is there so a passing test means the waveform came from `imem`.
 
 `make -f Makefile.uart` in `test/` is the longer UART transmitter bench. It assembles `prog/uart_8n1.asm` and checks the wire at several bit times, including 434 and 5208.

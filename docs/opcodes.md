@@ -12,10 +12,12 @@ CMD_WRITE   1   store one byte there, then address + 1
 CMD_PAYLOAD 2   output shift register (the byte to send)
 CMD_PC      3   first instruction of this run
 CMD_RUN     4   running = 1, data ignored
-CMD_READ    5   present the input shift on uio for one tick
+CMD_READ    5   stopped: input shift on uio. running: FIFO status on uio
+CMD_PUSH    6   enqueue one byte in the TX FIFO. legal while running
+CMD_POP     7   dequeue one byte from the RX FIFO onto uio. legal while running
 ```
 
-6 and 7 are unused. `CMD_READ` is only legal while stopped. It drives `uio` as an output for that tick. The instruction at `pc` runs on the tick after `CMD_RUN`.
+`CMD_ADDR`, `CMD_WRITE`, `CMD_PAYLOAD`, `CMD_PC`, and `CMD_RUN` are ignored while `running` is 1. `CMD_PUSH` and `CMD_POP` are not. A push during a hold does not skip a tick of that hold. `CMD_READ` and `CMD_POP` drive `uio` as an output for that tick, so a program that is using `uio` as a wire (I2C) cannot take them mid-transfer. The instruction at `pc` runs on the tick after `CMD_RUN`.
 
 `CMD_ADDR` / `CMD_WRITE` walk a flat byte space:
 
@@ -27,9 +29,32 @@ CMD_READ    5   present the input shift on uio for one tick
 | `0x44`, `0x45` | `Thi` |
 | `0x46`–`0x49` | role 0–3 binding |
 | `0x4A` | side-pin binding |
-| `0x4B` | `out_dir`, `in_dir`, `xreload` |
+| `0x4B` | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` |
 
 A protocol load is `CMD_ADDR 0x40` plus twelve writes, then `CMD_ADDR 0x00` plus two writes per word. A later frame of the same protocol is three ticks: `CMD_PAYLOAD`, `CMD_PC`, `CMD_RUN`. After a receive or a full-duplex transfer, `CMD_READ` returns the assembled byte.
+
+Byte `0x4B` is `{out_dir, in_dir, autopull, autopush, xreload[3:0]}`. Both FIFO bits come up 0, which is the one-byte machine.
+
+## TX and RX FIFOs
+
+Four bytes each. `CMD_PUSH` enqueues. `CMD_POP` dequeues and drives that byte on `uio` for the strobe tick. Empty pop drives `0x00` and does not move the pointer. A push into a full TX FIFO is dropped and sticks `tx_overrun`. An autopush into a full RX FIFO is dropped and sticks `rx_overrun`. `CMD_READ` while running drives this status byte and clears both flags unless the same tick overflowed:
+
+```text
+7  tx_full
+6  tx_empty
+5  rx_full
+4  rx_empty
+3  stall_tx     autopull is holding the program, pins frozen
+2  rx_overrun
+1  tx_overrun
+0  osr empty    the output shift has no byte loaded
+```
+
+Autopull (`0x4B` bit 5): the 8th `OP_SHIFT` or `OP_ODSHIFT` of a byte keeps that bit on the pin and, if the TX FIFO has a byte, loads it into the output shift on that same tick. The first byte is still `CMD_PAYLOAD`, or the oldest queued byte if `CMD_RUN` finds the shift empty. A looping program whose backward branch retires with no byte queued finishes that instruction (UART's stop bit, SPI's last sample) and then waits with the pins held. The wait is idle on a UART transmitter whose stop bit is the branch. It is a stretched last clock-high on the streaming SPI program, whose branch is the sample.
+
+Autopush (`0x4B` bit 4): the 8th `OP_IN` copies the input shift into the RX FIFO. The shift register itself is left alone, so `CMD_READ` after halt still returns it. The copy is dropped if the FIFO is full. Sampling does not stall.
+
+`prog/uart_8n1_stream.asm`, `prog/uart_rx_stream.asm`, and `prog/spi_mode0_stream.asm` are the looping forms. I2C is not one of them: the acknowledgement decides whether another byte exists, and SDA/SCL are `uio`, the same pins a push or pop would use.
 
 ## Opcodes
 

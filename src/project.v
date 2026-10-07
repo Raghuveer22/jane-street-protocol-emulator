@@ -4,13 +4,13 @@
  * Tiny Tapeout top for the Jane Street protocol-emulator ASIC.
  * UART, SPI, and I2C are programs loaded into pin_engine.
  *
- *   ui_in[0]     write strobe, one clock, while stopped
+ *   ui_in[0]     write strobe, one clock
  *   ui_in[3:1]   command
  *   ui_in[7:4]   free inputs. UART RX and SPI MISO use ui[4]
- *   uio_in       write data while stopped; protocol wires while running
+ *   uio_in       config/payload while stopped; CMD_PUSH data while running
  *   uo_out[6:0]  program outputs. Pin 8 is uo[0]
  *   uo_out[7]    running. Pin 15 is this flag, not a protocol pin
- *   uio_out/oe   program bidirectional pins, or the input shift on CMD_READ
+ *   uio_out/oe   program pins, or the shift/FIFO/status byte for one tick
  */
 
 `timescale 1ns/1ps

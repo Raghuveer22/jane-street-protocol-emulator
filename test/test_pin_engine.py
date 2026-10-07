@@ -14,6 +14,8 @@ CMD_PAYLOAD = 2
 CMD_PC = 3
 CMD_RUN = 4
 CMD_READ = 5
+CMD_PUSH = 6
+CMD_POP = 7
 
 # UART sender: start, eight data bits, stop, halt.
 UART_TX = [0x2001, 0x3008, 0x2200, 0x0000]
@@ -41,6 +43,14 @@ SDA = 0xB0      # uio[0], open-drain, idle released
 SCL = 0xB1      # uio[1], open-drain, idle released
 LSB8 = 0x08     # bit 0 first, xreload 8
 MSB8 = 0xC8     # bit 7 first, both directions, xreload 8
+LSB_PULL = 0x28 # LSB8 plus autopull
+LSB_PUSH = 0x18 # LSB8 plus autopush
+MSB_FIFO = 0xF8 # MSB8 plus autopull and autopush
+
+# Looping forms. The one-byte programs above are unchanged.
+UART_TX_STREAM = [0x2001, 0x3008, 0x220D]
+UART_RX_STREAM = [0x1001, 0x7010, 0x4008, 0x125F]
+SPI_STREAM = [0x2421, 0x3120, 0x49BB]
 
 
 def uo(dut):
@@ -445,3 +455,154 @@ async def transfer_i2c(dut, byte, ack, stretch, full_stop=True, pc=0):
         "data": data_bits,
         "cycles": cycles,
     }
+
+
+def contains(haystack, needle):
+    n = len(needle)
+    return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+
+async def pop_rx(dut, ui_rest=0):
+    """Pop one RX FIFO byte. ui_rest keeps protocol input bits, usually RX idle."""
+    dut.ui_in.value = (ui_rest & 0xF0) | 1 | (CMD_POP << 1)
+    await Timer(1, unit="ns")
+    assert int(dut.uio_oe.value) == 0xFF
+    value = int(dut.uio_out.value) & 0xFF
+    await step(dut)
+    dut.ui_in.value = ui_rest & 0xF0
+    await Timer(1, unit="ns")
+    return value
+
+
+@cocotb.test()
+async def test_uart_stream_back_to_back(dut):
+    """Three preloaded bytes leave the wire with no idle gap between frames."""
+    await boot(dut)
+    await load_cfg(dut, t=4, roles=(TX, 0, 0, 0), dirs=LSB_PULL)
+    await load_words(dut, UART_TX_STREAM)
+    await pulse(dut, CMD_PAYLOAD, 0x55)
+    await pulse(dut, CMD_PUSH, 0xA5)
+    await pulse(dut, CMD_PUSH, 0x01)
+    await pulse(dut, CMD_PC, 0)
+
+    samples = await capture(dut, 30 * 4)
+    assert samples == (
+        uart_frame(0x55, 4) + uart_frame(0xA5, 4) + uart_frame(0x01, 4)
+    )
+    await step(dut)
+    assert busy_of(dut) == 1
+    assert tx_of(dut) == 1, "an empty TX FIFO holds the line at idle"
+
+    await pulse(dut, CMD_PUSH, 0x0F)
+    extra = [tx_of(dut)]
+    for _ in range(10 * 4 + 2):
+        await step(dut)
+        extra.append(tx_of(dut))
+    assert contains(extra, uart_frame(0x0F, 4))
+
+
+@cocotb.test()
+async def test_uart_stream_push_during_the_frame(dut):
+    """A push in the middle of a bit does not stretch that bit."""
+    await boot(dut)
+    await load_cfg(dut, t=4, roles=(TX, 0, 0, 0), dirs=LSB_PULL)
+    await load_words(dut, UART_TX_STREAM)
+    await pulse(dut, CMD_PAYLOAD, 0x55)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    samples = [tx_of(dut)]
+    await step(dut)
+    samples.append(tx_of(dut))
+    await pulse(dut, CMD_PUSH, 0xA5)
+    samples.append(tx_of(dut))
+    for _ in range(10 * 4 - 3):
+        await step(dut)
+        samples.append(tx_of(dut))
+    for _ in range(10 * 4):
+        await step(dut)
+        samples.append(tx_of(dut))
+    assert samples == uart_frame(0x55, 4) + uart_frame(0xA5, 4)
+
+
+@cocotb.test()
+async def test_uart_rx_autopush(dut):
+    await boot(dut)
+    period = 4
+    await load_cfg(dut, t=period, roles=(RX, 0, 0, 0), dirs=LSB_PUSH)
+    await load_words(dut, UART_RX_STREAM)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    assert busy_of(dut) == 1
+
+    dut.ui_in.value = 0x10
+    for _ in range(3):
+        await step(dut)
+
+    for byte in (0xA5, 0x5A):
+        bits = [0] + [((byte >> i) & 1) for i in range(8)] + [1]
+        for bit in bits:
+            dut.ui_in.value = (bit & 1) << 4
+            for _ in range(period):
+                await step(dut)
+
+    dut.ui_in.value = 0x10
+    for _ in range(period + 4):
+        await step(dut)
+
+    assert await pop_rx(dut, ui_rest=0x10) == 0xA5
+    assert await pop_rx(dut, ui_rest=0x10) == 0x5A
+    assert busy_of(dut) == 1, "the receiver stays armed for another start"
+
+
+@cocotb.test()
+async def test_spi_stream_two_bytes(dut):
+    """CS stays low and the clock does not pause between the two bytes."""
+    await boot(dut)
+    await load_cfg(
+        dut, tlo=2, thi=2, roles=(MOSI, CS, MISO, 0), side=SCK, dirs=MSB_FIFO
+    )
+    await load_words(dut, SPI_STREAM)
+    await pulse(dut, CMD_PAYLOAD, 0xA5)
+    await pulse(dut, CMD_PUSH, 0x3C)
+    await pulse(dut, CMD_PC, 0)
+    await load_bytes(dut, 0x4A, [SCK])
+    await pulse(dut, CMD_RUN, 0)
+    assert busy_of(dut) == 1
+
+    rx_bytes = (0x96, 0x0F)
+    bit_i = 0
+    captured = []
+    prev_sck = (uo(dut) >> 2) & 1
+    for _ in range(120):
+        cs = (uo(dut) >> 1) & 1
+        sck = (uo(dut) >> 2) & 1
+        if cs == 0 and sck == 0 and bit_i < 16:
+            rx_byte = rx_bytes[bit_i // 8]
+            dut.ui_in.value = ((rx_byte >> (7 - (bit_i % 8))) & 1) << 4
+        else:
+            dut.ui_in.value = 0
+        await step(dut)
+        cs = (uo(dut) >> 1) & 1
+        sck = (uo(dut) >> 2) & 1
+        mosi = uo(dut) & 1
+        if prev_sck == 0 and sck == 1 and cs == 0 and bit_i < 16:
+            captured.append(mosi)
+            bit_i += 1
+        prev_sck = sck
+        if bit_i == 16 and busy_of(dut) == 1 and sck == 1:
+            # The last sample leaves SCK high, and an empty TX FIFO holds it.
+            break
+    assert bit_i == 16, f"saw {bit_i} rising edges"
+    assert busy_of(dut) == 1
+    assert (uo(dut) & 0x02) == 0, "CS stays low across both bytes"
+    sent = []
+    for n in range(2):
+        value = 0
+        for bit in captured[n * 8:(n + 1) * 8]:
+            value = ((value << 1) | bit) & 0xFF
+        sent.append(value)
+    assert sent == [0xA5, 0x3C]
+    assert await pop_rx(dut) == 0x96
+    assert await pop_rx(dut) == 0x0F
+
