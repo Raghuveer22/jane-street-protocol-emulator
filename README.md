@@ -10,7 +10,7 @@ A small reprogrammable CPU whose instruction set reads pins, writes pins, and co
 
 Required first protocols: UART, SPI, I2C.
 
-Stretch: low-speed USB, 10 Mbit Ethernet. Also worth considering: JTAG, SWD, PS/2, CAN.
+Low-speed USB is a program: `prog/usb_ls_tx.asm` and `prog/usb_ls_rx.asm`, at `T = 33`. `hold=Th` alternates 2 and 3 ticks when `T = 5`, so a 10 Mbit Manchester bit cell is exact and the mid-bit edge is 40 ns then 60 ns. A full Ethernet frame is still not a program. `IN abort` drops the transmitter when the sampled bit disagrees with the bit just shifted, which is the CAN arbitration check. Also worth considering: JTAG, SWD, PS/2.
 
 ## Silicon budget
 

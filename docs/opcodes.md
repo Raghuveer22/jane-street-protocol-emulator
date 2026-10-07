@@ -68,6 +68,8 @@ OP_IN      0x4  sample role into the input shift
 OP_OD      0x5  pull or release role. val 0 pulls, val 1 releases
 OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
 OP_HOLD    0x7  change no pin, only load the wait
+OP_NRZI    0x8  one byte as NRZI. side pin is the complement. stuff after six 1s
+OP_NRZIN   0x9  sample one byte, NRZI-decode, drop the stuffed 0
 ```
 
 `OP_SHIFT` and `OP_ODSHIFT` consume one, two, or four bits of the output shift. `OP_IN` shifts that many sampled bits in. Width 1, the reset value, drives or samples the role pin. Width 2 or 4 uses consecutive pins at the base in `0x4C`, and the low pin of the group is the low bit of that group. Bit order is `out_dir` / `in_dir`: 0 sends the low group first, 1 sends the high group first. A group has to sit inside one port. Pin 15 is `running`, so four bits cannot cross from `uo` into `uio`. `uo[6:0]` and `uio[7:0]` and `ui[7:0]` can each hold one.
@@ -76,14 +78,16 @@ Byte `0x4C` is `{0, width[1:0], base[4:0]}`. `width` 0 is one bit, 1 is two, 2 i
 
 Autopull and autopush count bits. A quad shift empties the byte in two instructions.
 
-`side` is allowed on `OP_SET`, `OP_SHIFT`, `OP_IN`, `OP_OD`, and `OP_ODSHIFT`. The data pin and the side pin update together, then the hold runs.
+`side` is allowed on `OP_SET`, `OP_SHIFT`, `OP_IN`, `OP_OD`, `OP_ODSHIFT`, and `OP_NRZI`. The data pin and the side pin update together, then the hold runs. On `OP_NRZI` the side pin is the complement of the role pin. `side_val` is not used.
+
+`val` on `OP_IN` is the abort flag. 0 is a normal sample. 1 still samples, then clears `running` if that bit differs from the bit last driven by `OP_SHIFT` or `OP_ODSHIFT`. The pins stay. The loop does not branch. `CMD_RUN` forgets that bit, so a frame that aborts has to have shifted first. This is CAN arbitration: a recessive bit (`ODSHIFT` of 1) that comes back dominant drops the transmitter off the bus.
 
 ## Word fields
 
 ```text
 15:12  op
 11:10  role        0–3, bound in the load map
-    9  val         SET level, WAIT level, OD pull/release
+    9  val         SET level, WAIT level, OD pull/release, IN abort
     8  side        1 writes the side pin this tick
     7  side_val    level, or pull/release if the side pin is open-drain
   6:4  hold        which wait to load after the pin update
@@ -100,7 +104,8 @@ Autopull and autopush count bits. A quad shift empties the byte in two instructi
 | 3 | `Thi` | high half. Fastest SPI is `Tlo = Thi = 1` |
 | 4 | `1` | one tick |
 | 5 | none | next instruction on the next tick |
-| 6, 7 | | reserved |
+| 6 | `Th` | `floor(T/2)`, then `ceil(T/2)`, alternating. `T = 5` is 2 ticks then 3 |
+| 7 | | reserved |
 
 Unused fields are 0.
 
@@ -108,7 +113,21 @@ Unused fields are 0.
 
 Shift out (`OP_SHIFT`, `OP_ODSHIFT`), shift in (`OP_IN`), a second pin on the same tick (`side`), six hold lengths, a loop of `xreload` bits (`setx` / `xdec` / `back`), stall (`OP_WAIT`), pull/release (`OP_OD`), and halt with the pins held (`OP_HALT`).
 
-No forward jump. No branch on the bit just sampled. Two pins per step, not three. One byte per shift register per run.
+`OP_NRZI` and `OP_NRZIN` are the low-speed USB pair. Each visit moves one byte, because `x` is the only counter and `back` reaches at most three instructions, so a bit loop and a byte loop cannot both be written out. A stuffed bit is an extra hold inside that byte, not an extra instruction.
+
+## Low-speed USB
+
+CRC, the PID complement, and the descriptors stay on the host. The bytes queued for a packet are plain data, sync first. Sync is the byte `0x80`. Bit order is LSB first. `T = 33` is 50e6/33 ≈ 1.515 Mbit/s, about 1 percent fast of 1.5 Mbit/s, inside the low-speed window.
+
+`OP_NRZI` with `val` 0 sends one byte on the role pin. A 0 toggles a one-bit line state. A 1 holds it. `side` drives the other pin to the complement, which is D− when the role is D+. After six 1s the engine inserts one extra bit time, a 0, before the next payload bit, including across a byte boundary and before EOP. `x` counts bytes. `val` 1 drives J (role 0, side 1), clears the line state and the ones count, and does not take a payload bit. That is the last bit of EOP. SE0 is `OP_SET` of both pins to 0, twice, for two bit times.
+
+`OP_NRZIN` samples the role pin. A change from the remembered level is a 0. The same level is a 1. The bit time after six 1s is discarded and updates the remembered level. One visit assembles one byte. Autopush queues it.
+
+`prog/usb_ls_tx.asm` and `prog/usb_ls_rx.asm` are the programs. Idle is J: D+ low, D− high. Starting the transmitter at the first SE0 word is a low-speed keep-alive. Autopull has to be off for that run, because an empty output shift stalls the machine before the first instruction.
+
+Full-speed (12 Mbit/s) has no integer `T` on the 50 MHz clock. High-speed (480 Mbit/s) is a fraction of a tick, and a different electrical interface. Neither is this pair of opcodes.
+
+No forward jump. The one branch on a sampled bit is `OP_IN` with `val` 1, and it halts rather than skipping ahead. Two pins per step, not three. One byte per shift register per run.
 
 ## SPI: as many slaves as the ASIC pins allow
 

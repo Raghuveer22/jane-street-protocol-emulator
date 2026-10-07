@@ -13,6 +13,8 @@
  *   OP_OD      0x5  pull or release role. val 0 pulls, val 1 releases
  *   OP_ODSHIFT 0x6  payload bit 0 pulls role, bit 1 releases it
  *   OP_HOLD    0x7  change no pin, only load the wait
+ *   OP_NRZI    0x8  one byte, NRZI, differential side, stuff after six 1s
+ *   OP_NRZIN   0x9  sample one byte, NRZI decode, drop the stuffed bit
  *
  * Config writes are ignored while a program is running. CMD_PUSH and
  * CMD_POP are not: they move one byte into the TX FIFO or out of the RX
@@ -20,7 +22,10 @@
  * bits in the direction byte. Off, this is the one-byte machine.
  *
  * The instruction at pc runs on the clock after CMD_RUN. A hold length of
- * 0 is a hold of 1. uo[7] is `running`, so pin 15 is not a protocol pin.
+ * 0 is a hold of 1. Hold code 6 alternates floor(T/2) and ceil(T/2);
+ * CMD_RUN starts on the short half. OP_IN with val 1 halts when the sample
+ * differs from the bit last driven by OP_SHIFT or OP_ODSHIFT. uo[7] is
+ * `running`, so pin 15 is not a protocol pin.
  */
 
 `timescale 1ns/1ps
@@ -53,6 +58,8 @@ module pin_engine (
     localparam [3:0] OP_OD      = 4'h5;
     localparam [3:0] OP_ODSHIFT = 4'h6;
     localparam [3:0] OP_HOLD    = 4'h7;
+    localparam [3:0] OP_NRZI    = 4'h8;
+    localparam [3:0] OP_NRZIN   = 4'h9;
 
     reg [15:0] imem [0:31];
     reg [15:0] t_reg, tlo_reg, thi_reg;
@@ -77,7 +84,18 @@ module pin_engine (
     reg        running;
     reg [15:0] wait_left;
     reg [3:0]  xcnt;
+    // Th (hold code 6) consumes this. 0 selects floor(T/2), 1 selects ceil.
+    reg        half_phase;
+    // Bit last driven by OP_SHIFT or OP_ODSHIFT. OP_IN val 1 compares it.
+    reg        sent;
     reg [7:0]  uo_q, uio_q, uio_oe_q;
+    // NRZI line state. 0 is J (D+ low). ones counts consecutive 1s so a
+    // stuffed 0 can be inserted, or skipped on receive, without a second loop.
+    reg        nrzi;
+    reg [2:0]  ones;
+    reg        stuff_pend, stuff_tx, stuff_side;
+    reg [4:0]  stuff_pin, stuff_spin;
+    reg [2:0]  stuff_hold;
 
     wire       wr   = ui[0];
     wire [2:0] cmd  = ui[3:1];
@@ -122,6 +140,13 @@ module pin_engine (
         (sh_width == 3'd4) ? (out_dir ? {oshift[3:0], 4'b0} : {4'b0, oshift[7:4]}) :
         (sh_width == 3'd2) ? (out_dir ? {oshift[5:0], 2'b0} : {2'b0, oshift[7:2]}) :
                              (out_dir ? {oshift[6:0], 1'b0} : {1'b0, oshift[7:1]});
+    // NRZI always moves one payload bit, even when 0x4C asks for a wider bus.
+    wire [7:0] oshift_one = out_dir ? {oshift[6:0], 1'b0} : {1'b0, oshift[7:1]};
+    wire       nrzi_next  = out_bit ? nrzi : ~nrzi;
+    wire       nrzi_dec   = (sampled == nrzi);
+    wire [7:0] ishift_nrzi = in_dir ? {ishift[6:0], nrzi_dec} : {nrzi_dec, ishift[7:1]};
+    wire       nrzi_byte  = (({1'b0, shift_n} + 5'd1) >= 5'd8);
+    wire       nrzin_byte = (({1'b0, in_n} + 5'd1) >= 5'd8);
     wire       show_ishift = ~running & wr & (cmd == CMD_READ);
     wire       show_pop    = wr & (cmd == CMD_POP);
     wire       show_status = running & wr & (cmd == CMD_READ);
@@ -315,6 +340,7 @@ module pin_engine (
 
     function [15:0] hold_ticks;
         input [2:0] h;
+        input phase;
         reg [15:0] n;
         begin
             case (h)
@@ -322,11 +348,26 @@ module pin_engine (
                 3'd1: n = {1'b0, t_reg[15:1]};
                 3'd2: n = tlo_reg;
                 3'd3: n = thi_reg;
+                // Short half, then long half, for an odd T. T = 5 is 2 then 3.
+                3'd6: begin
+                    n = {1'b0, t_reg[15:1]};
+                    if (t_reg[0] && phase)
+                        n = n + 16'd1;
+                end
                 default: n = 16'd1;
             endcase
             hold_ticks = (n == 16'd0) ? 16'd1 : n;
         end
     endfunction
+
+    task load_wait;
+        input [2:0] hold_code;
+        begin
+            wait_left <= hold_ticks(hold_code, half_phase) - 16'd1;
+            if (hold_code == 3'd6)
+                half_phase <= ~half_phase;
+        end
+    endtask
 
     task commit_pins;
         input [23:0] pins;
@@ -342,7 +383,7 @@ module pin_engine (
         begin
             xcnt      <= x_next;
             pc        <= pc_next;
-            wait_left <= hold_ticks(hold_code) - 16'd1;
+            load_wait(hold_code);
             // A backward branch is the frame seam. Stall there, after this
             // instruction's pins and hold are committed, if the next byte
             // never arrived. UART's stop bit is that branch: the line sits
@@ -382,6 +423,49 @@ module pin_engine (
         end
     endtask
 
+    // One payload bit. The 8th bit of a byte refills from the TX FIFO when
+    // autopull is on. Width in 0x4C does not apply: NRZI is a single wire bit.
+    task take_one_bit;
+        begin
+            if (nrzi_byte) begin
+                if (autopull && (tx_count != 3'd0)) begin
+                    oshift    <= tx_mem[tx_r];
+                    eng_pop_b  = 1'b1;
+                    shift_n   <= 4'd0;
+                    osr_valid <= 1'b1;
+                end else if (autopull && host_push_b) begin
+                    oshift      <= wdata;
+                    host_push_b  = 1'b0;
+                    shift_n     <= 4'd0;
+                    osr_valid   <= 1'b1;
+                end else begin
+                    oshift    <= oshift_one;
+                    shift_n   <= 4'd8;
+                    osr_valid <= 1'b0;
+                    if (autopull && take_back)
+                        stall_tx <= 1'b1;
+                end
+            end else begin
+                oshift  <= oshift_one;
+                shift_n <= shift_n + 4'd1;
+            end
+        end
+    endtask
+
+    // The stuffed 0 is its own bit time after the six 1s, on the pins this
+    // instruction already chose. PC has often already moved on.
+    task arm_stuff;
+        input tx;
+        begin
+            stuff_pend <= 1'b1;
+            stuff_tx   <= tx;
+            stuff_pin  <= role_pin;
+            stuff_spin <= side_pin;
+            stuff_side <= side;
+            stuff_hold <= hold;
+        end
+    endtask
+
     always @(posedge clk) begin
         if (!rst_n) begin
             t_reg     <= 16'd1;
@@ -403,9 +487,11 @@ module pin_engine (
             ishift    <= 8'd0;
             pc        <= 5'd0;
             waddr     <= 8'd0;
-            running   <= 1'b0;
-            wait_left <= 16'd0;
-            xcnt      <= 4'd0;
+            running    <= 1'b0;
+            wait_left  <= 16'd0;
+            xcnt       <= 4'd0;
+            half_phase <= 1'b0;
+            sent       <= 1'b0;
             tx_w      <= 2'd0;
             tx_r      <= 2'd0;
             rx_w      <= 2'd0;
@@ -422,6 +508,14 @@ module pin_engine (
             uo_q      <= 8'h01;
             uio_q     <= 8'h00;
             uio_oe_q  <= 8'h00;
+            nrzi       <= 1'b0;
+            ones       <= 3'd0;
+            stuff_pend <= 1'b0;
+            stuff_tx   <= 1'b0;
+            stuff_side <= 1'b0;
+            stuff_pin  <= 5'd0;
+            stuff_spin <= 5'd0;
+            stuff_hold <= 3'd0;
             for (i = 0; i < 32; i = i + 1)
                 imem[i] <= 16'h0000;
         end else begin
@@ -494,10 +588,15 @@ module pin_engine (
                         end
                         CMD_PC: pc <= wdata[4:0];
                         CMD_RUN: begin
-                            running   <= 1'b1;
-                            wait_left <= 16'd0;
-                            ishift    <= 8'd0;
-                            in_n      <= 4'd0;
+                            running    <= 1'b1;
+                            wait_left  <= 16'd0;
+                            half_phase <= 1'b0;
+                            sent       <= 1'b0;
+                            ishift     <= 8'd0;
+                            in_n       <= 4'd0;
+                            nrzi       <= 1'b0;
+                            ones       <= 3'd0;
+                            stuff_pend <= 1'b0;
                             if (autopull && !osr_valid && (tx_count != 3'd0)) begin
                                 oshift    <= tx_mem[tx_r];
                                 osr_valid <= 1'b1;
@@ -514,6 +613,21 @@ module pin_engine (
                 end
             end else if (wait_left != 16'd0) begin
                 wait_left <= wait_left - 16'd1;
+            end else if (stuff_pend) begin
+                // Inserted bit time. Transmit toggles. Receive samples and
+                // drops the bit. The program counter stays where retire left it.
+                stuff_pend <= 1'b0;
+                ones       <= 3'd0;
+                if (stuff_tx) begin
+                    nrzi <= ~nrzi;
+                    commit_pins(drive_pair(
+                        {uo_q, uio_q, uio_oe_q},
+                        1'b1, stuff_side, 1'b0,
+                        stuff_pin, stuff_spin, ~nrzi, nrzi
+                    ));
+                end else
+                    nrzi <= level_of(stuff_pin, ui, uo_q, uio_q, uio_oe_q, uio_in);
+                load_wait(stuff_hold);
             end else if (stall_tx) begin
                 if (tx_count != 3'd0) begin
                     oshift    <= tx_mem[tx_r];
@@ -529,7 +643,8 @@ module pin_engine (
                     stall_tx    <= 1'b0;
                 end
             end else if (autopull && !osr_valid &&
-                         ((op == OP_SHIFT) || (op == OP_ODSHIFT))) begin
+                         ((op == OP_SHIFT) || (op == OP_ODSHIFT) ||
+                          ((op == OP_NRZI) && !val))) begin
                 stall_tx <= 1'b1;
             end else begin
                 case (op)
@@ -559,6 +674,7 @@ module pin_engine (
                                 {uo_q, uio_q, uio_oe_q},
                                 1'b1, side, 1'b0, role_pin, side_pin, out_bit, side_val
                             ));
+                        sent <= out_bit;
                         take_out_bit();
                         retire(hold);
                     end
@@ -583,7 +699,13 @@ module pin_engine (
                             in_n <= 4'd0;
                         end else if (autopush)
                             in_n <= in_n + {1'b0, sh_width};
-                        retire(hold);
+                        // val 1: the wire disagreed with the bit just driven.
+                        // Pins stay. The sample is already in the input shift.
+                        if (val && (sampled != sent)) begin
+                            running  <= 1'b0;
+                            stall_tx <= 1'b0;
+                        end else
+                            retire(hold);
                     end
                     OP_OD: begin
                         commit_pins(drive_pair(
@@ -603,10 +725,73 @@ module pin_engine (
                                 {uo_q, uio_q, uio_oe_q},
                                 1'b1, side, 1'b1, role_pin, side_pin, out_bit, side_val
                             ));
+                        sent <= out_bit;
                         take_out_bit();
                         retire(hold);
                     end
                     OP_HOLD: retire(hold);
+                    OP_NRZI: begin
+                        if (val) begin
+                            // EOP's trailing J. No payload bit. Line state
+                            // returns to idle so the next packet starts from J.
+                            nrzi       <= 1'b0;
+                            ones       <= 3'd0;
+                            stuff_pend <= 1'b0;
+                            commit_pins(drive_pair(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, side, 1'b0, role_pin, side_pin, 1'b0, 1'b1
+                            ));
+                            retire(hold);
+                        end else begin
+                            commit_pins(drive_pair(
+                                {uo_q, uio_q, uio_oe_q},
+                                1'b1, side, 1'b0,
+                                role_pin, side_pin, nrzi_next, ~nrzi_next
+                            ));
+                            nrzi <= nrzi_next;
+                            if (!out_bit)
+                                ones <= 3'd0;
+                            else if (ones == 3'd5)
+                                begin
+                                    ones <= 3'd6;
+                                    arm_stuff(1'b1);
+                                end
+                            else
+                                ones <= ones + 3'd1;
+                            take_one_bit();
+                            // Eight payload bits, then the byte loop. A stuffed
+                            // 0, if this bit armed one, is inserted before the
+                            // next instruction because stuff_pend wins over fetch.
+                            if (nrzi_byte)
+                                retire(hold);
+                            else
+                                load_wait(hold);
+                        end
+                    end
+                    OP_NRZIN: begin
+                        ishift <= ishift_nrzi;
+                        nrzi   <= sampled;
+                        if (nrzi_dec) begin
+                            if (ones == 3'd5) begin
+                                ones <= 3'd6;
+                                arm_stuff(1'b0);
+                            end else
+                                ones <= ones + 3'd1;
+                        end else
+                            ones <= 3'd0;
+                        if (nrzin_byte) begin
+                            if (autopush && ((rx_count < 3'd4) || (host_pop_b && (rx_count != 3'd0)))) begin
+                                eng_push_b      = 1'b1;
+                                eng_push_data_b = ishift_nrzi;
+                            end else if (autopush)
+                                rx_over_b = 1'b1;
+                            in_n <= 4'd0;
+                            retire(hold);
+                        end else begin
+                            in_n <= in_n + 4'd1;
+                            load_wait(hold);
+                        end
+                    end
                     default: pc <= pc + 5'd1;
                 endcase
             end

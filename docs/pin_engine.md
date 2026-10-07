@@ -10,7 +10,7 @@ The host is the test, or later a controller on the board. It fills the interpret
 | --- | --- | --- |
 | `imem` | 32 words of 16 bits | The program. One word is one run step |
 | `pc` | 5 bits | Index into `imem` |
-| `T`, `Tlo`, `Thi` | 16 bits each | The hold lengths a step can name. `T/2` is `T` shifted right by 1 |
+| `T`, `Tlo`, `Thi` | 16 bits each | The hold lengths a step can name. `T/2` is `T` shifted right by 1. `Th` alternates `floor(T/2)` and `ceil(T/2)` |
 | roles 0–3, side | one byte each | Which pin, how it is driven, and the idle level |
 | `out_dir`, `in_dir`, `autopull`, `autopush`, `xreload` | packed in one byte | Bit order, FIFO refill, and the value `setx` loads |
 | shift width, base pin | one byte, `0x4C` | 1, 2, or 4 bits, starting at a pin. Width 1 uses the role |
@@ -19,6 +19,8 @@ The host is the test, or later a controller on the board. It fills the interpret
 | input shift | 8 bits | The byte assembled from sampled pins |
 | `x` | 4 bits | Loop counter |
 | `wait_left` | 16 bits | Clocks remaining in the current hold |
+| `half_phase` | 1 bit | Which half `Th` uses next. 0 is the short half. `CMD_RUN` clears it |
+| `sent` | 1 bit | Payload bit last driven by `SHIFT` or `ODSHIFT`. `CMD_RUN` clears it |
 | `running` | 1 bit | 1 while the program has not reached `HALT`. This is `uo[7]` |
 
 On each rising clock the interpreter does one of these, in order:
@@ -38,14 +40,16 @@ The opcode is the high nibble of the instruction word.
 | `0x1` | `WAIT` | Stall until the role reads `val` |
 | `0x2` | `SET` | Drive the role to `val`, push-pull |
 | `0x3` | `SHIFT` | Drive the role to the next payload bit, push-pull |
-| `0x4` | `IN` | Sample the role into the input shift |
+| `0x4` | `IN` | Sample the role into the input shift. `val` 1 halts if the sample differs from `sent` |
 | `0x5` | `OD` | Pull or release the role. `val` 0 pulls, 1 releases |
 | `0x6` | `ODSHIFT` | Payload bit 0 pulls the role, bit 1 releases it |
 | `0x7` | `HOLD` | Change no pin. Load the wait |
+| `0x8` | `NRZI` | One byte, NRZI, on the role pin. The side pin is the complement. Six 1s insert a 0 |
+| `0x9` | `NRZIN` | One byte sampled and NRZI-decoded. The stuffed 0 is dropped |
 
-`side` on `SET`, `SHIFT`, `IN`, `OD`, and `ODSHIFT` writes the side pin on that same tick. A hold length of 0 is stored as a hold of 1. The hold counter is loaded with `ticks - 1` on the clock the instruction runs, so the level lasts `ticks` clocks. `hold = none` and `hold = 1` both last one clock.
+`side` on `SET`, `SHIFT`, `IN`, `OD`, and `ODSHIFT` writes the side pin on that same tick. A hold length of 0 is stored as a hold of 1. The hold counter is loaded with `ticks - 1` on the clock the instruction runs, so the level lasts `ticks` clocks. `hold = none` and `hold = 1` both last one clock. `hold = Th` lasts `floor(T/2)` ticks the first time and `ceil(T/2)` the next. For `T = 5` that is 2 then 3, so a pair of halves is one 100 ns bit and the edge between them is 40 ns, then 60 ns.
 
-The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, config and payload writes are dropped. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock, and a push does not steal a tick from a hold. `CMD_RUN` clears the input shift.
+The first instruction runs on the clock after the host's `CMD_RUN`, because that write is the clock that sets `running`. While `running` is 1, config and payload writes are dropped. `CMD_PUSH` and `CMD_POP` still move one FIFO byte on that clock, and a push does not steal a tick from a hold. `CMD_RUN` clears the input shift, `half_phase`, and `sent`.
 
 ## Pins
 
@@ -91,6 +95,8 @@ The programs:
 | `prog/uart_8n1_stream.asm` | Transmit frames back to back from the TX FIFO |
 | `prog/uart_rx_stream.asm` | Receive frames back to back into the RX FIFO |
 | `prog/spi_mode0_stream.asm` | Master, CS held, bytes from the FIFOs |
+| `prog/usb_ls_tx.asm` | Low-speed USB packet. NRZI, bit stuffing, EOP |
+| `prog/usb_ls_rx.asm` | Low-speed USB receive. Sync edge, unstuff, one byte per visit |
 
 `prog/asm.py` assembles those mnemonics to one word per line.
 

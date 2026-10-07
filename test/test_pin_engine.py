@@ -56,6 +56,11 @@ QSPI_OUT = [0x3140, 0x31C0, 0x0000]
 # setx, then four shifts of one group. xreload is the number of groups.
 QSPI_GROUPS = [0x7041, 0x3048, 0x0000]
 QSPI_IN = [0x4040, 0x4040, 0x0000]
+# Low-speed USB. One NRZI instruction is one byte. EOP is the two SE0s plus J.
+USB_TX = [0x7051, 0x8108, 0x2100, 0x2100, 0x8300, 0x0000]
+USB_RX = [0x1250, 0x7011, 0x9008, 0x0000]
+DP = 0x48   # uo[0], push-pull, idle 0. Low-speed J.
+DM = 0x69   # uo[1], push-pull, idle 1.
 
 
 def uo(dut):
@@ -686,4 +691,211 @@ async def test_dual_shift(dut):
         await step(dut)
         got.append(uo(dut) & 0x3)
     assert got == [0b10, 0b10, 0b01, 0b01]
+
+
+def nrzi_bits(payload):
+    """D+ levels for one low-speed packet, sync included, before EOP.
+
+    State 0 is J. A 0 toggles. A 1 holds. Six 1s insert a toggled stuff bit.
+    """
+    state = 0
+    ones = 0
+    bits = []
+    for byte in payload:
+        for i in range(8):
+            bit = (byte >> i) & 1
+            if bit:
+                ones += 1
+            else:
+                state ^= 1
+                ones = 0
+            bits.append(state)
+            if ones == 6:
+                state ^= 1
+                ones = 0
+                bits.append(state)
+    return bits
+
+
+def usb_tx_dirs(nbytes):
+    return 0x20 | (nbytes & 0xF)
+
+
+def usb_rx_dirs(nbytes):
+    return 0x10 | (nbytes & 0xF)
+
+
+def pair_of(dut):
+    return (uo(dut) & 1, (uo(dut) >> 1) & 1)
+
+
+def usb_tx_wave(payload, period):
+    wave = [(0, 1)]
+    for bit in nrzi_bits(payload):
+        wave.extend([(bit, 1 - bit)] * period)
+    wave.extend([(0, 0)] * (2 * period))
+    wave.extend([(0, 1)] * period)
+    return wave
+
+
+async def capture_until_halt(dut):
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    samples = [pair_of(dut)]
+    for _ in range(4000):
+        await step(dut)
+        if busy_of(dut) == 0:
+            return samples
+        samples.append(pair_of(dut))
+    raise AssertionError("USB program did not halt")
+
+
+@cocotb.test()
+async def test_usb_ls_tx(dut):
+    """Sync, ACK, a stuffed 0xFF, and a keep-alive, on D+ and D−."""
+    await boot(dut)
+    ack = [0x80, 0xD2]
+    stuffed = [0x80, 0xFF]
+    assert len(nrzi_bits(ack)) == 16
+    assert len(nrzi_bits(stuffed)) == 17
+
+    for period, payload in ((4, ack), (4, stuffed), (33, ack)):
+        await load_cfg(
+            dut, t=period, roles=(DP, 0, 0, 0), side=DM, dirs=usb_tx_dirs(len(payload))
+        )
+        await load_words(dut, USB_TX)
+        await pulse(dut, CMD_PAYLOAD, payload[0])
+        for byte in payload[1:]:
+            await pulse(dut, CMD_PUSH, byte)
+        await pulse(dut, CMD_PC, 0)
+        samples = await capture_until_halt(dut)
+        assert samples == usb_tx_wave(payload, period), (
+            f"T={period} payload={[hex(b) for b in payload]}"
+        )
+        assert busy_of(dut) == 0
+        assert pair_of(dut) == (0, 1)
+
+    # The loop above leaves T at 33. A keep-alive is the EOP words alone.
+    # Autopull stays set from the packet, and the shift register is empty,
+    # which would stall before the first SE0. Turn autopull off.
+    await load_bytes(dut, 0x40, u16(4))
+    await load_bytes(dut, 0x4B, [0x00])
+    await pulse(dut, CMD_PC, 2)
+    keep = await capture_until_halt(dut)
+    assert keep == [(0, 0)] * 8 + [(0, 1)] * 4
+    assert pair_of(dut) == (0, 1)
+
+
+@cocotb.test()
+async def test_usb_ls_rx(dut):
+    """Replay a low-speed packet on D+ and pop the unstuffed bytes."""
+    await boot(dut)
+    for period, payload in ((4, [0x80, 0xD2]), (8, [0x80, 0xFF]), (33, [0x80, 0x00, 0xFF])):
+        await load_cfg(dut, t=period, roles=(RX, 0, 0, 0), dirs=usb_rx_dirs(len(payload)))
+        await load_words(dut, USB_RX)
+        await pulse(dut, CMD_PC, 0)
+        await pulse(dut, CMD_RUN, 0)
+        dut.ui_in.value = 0
+        await step(dut)
+        await step(dut)
+        for bit in nrzi_bits(payload):
+            dut.ui_in.value = (bit & 1) << 4
+            for _ in range(period):
+                await step(dut)
+        dut.ui_in.value = 0
+        for _ in range(period * 4):
+            await step(dut)
+            if busy_of(dut) == 0:
+                break
+        assert busy_of(dut) == 0, f"RX did not halt, T={period}"
+        got = []
+        for _ in payload:
+            got.append(await pop_rx(dut))
+        assert got == payload, f"T={period} got {[hex(b) for b in got]}"
+
+
+# Four pushes of a pin. hold=Th. Levels alternate 0, 1, 0, 1.
+TH_LEVELS = [0x2060, 0x2260, 0x2060, 0x2260, 0x0000]
+# Load x, then ODSHIFT one bit and sample RX. back=1 returns to the shift.
+ARB = [0x7051, 0x6040, 0x464A, 0x0000]
+TX_OD = 0xB0  # uio[0], open-drain, idle released
+
+
+def runs_of(samples):
+    runs = []
+    for bit in samples:
+        if runs and runs[-1][0] == bit:
+            runs[-1] = (bit, runs[-1][1] + 1)
+        else:
+            runs.append((bit, 1))
+    return runs
+
+
+@cocotb.test()
+async def test_th_alternates_on_odd_t(dut):
+    """T = 5. Th holds 2 ticks, then 3, so two halves are one 10 Mbit cell."""
+    await boot(dut)
+    await load_cfg(dut, t=5, roles=(TX, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, TH_LEVELS)
+    await pulse(dut, CMD_PC, 0)
+    samples = await capture(dut, 10)
+    assert runs_of(samples) == [(0, 2), (1, 3), (0, 2), (1, 3)]
+    await step(dut)
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_th_matches_half_when_t_even(dut):
+    """T = 4. floor and ceil are both 2, the same length as T/2."""
+    await boot(dut)
+    await load_cfg(dut, t=4, roles=(TX, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, TH_LEVELS)
+    await pulse(dut, CMD_PC, 0)
+    samples = await capture(dut, 8)
+    assert runs_of(samples) == [(0, 2), (1, 2), (0, 2), (1, 2)]
+
+
+@cocotb.test()
+async def test_in_abort_drops_the_transmitter(dut):
+    """A released bit that reads back 0 halts before the next drive."""
+    await boot(dut)
+    await load_cfg(dut, roles=(TX_OD, RX, 0, 0), dirs=0x02)
+    await load_words(dut, ARB)
+    await pulse(dut, CMD_PAYLOAD, 0x01)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    assert busy_of(dut) == 1
+    dut.ui_in.value = 0
+    await step(dut)
+    await step(dut)
+    assert (int(dut.uio_oe.value) & 1) == 0, "recessive bit releases the pin"
+    await step(dut)
+    assert busy_of(dut) == 0, "mismatch should halt on the sample"
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert (int(dut.uio_oe.value) & 1) == 0, "the following dominant bit must not drive"
+
+
+@cocotb.test()
+async def test_in_abort_continues_when_the_wire_matches(dut):
+    """Two bits that read back as driven finish the loop and halt."""
+    await boot(dut)
+    await load_cfg(dut, roles=(TX_OD, RX, 0, 0), dirs=0x02)
+    await load_words(dut, ARB)
+    await pulse(dut, CMD_PAYLOAD, 0x01)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.ui_in.value = 0x10
+    await step(dut)
+    await step(dut)
+    await step(dut)
+    assert busy_of(dut) == 1, "a matching recessive bit stays in the loop"
+    dut.ui_in.value = 0
+    await step(dut)
+    assert (int(dut.uio_oe.value) & 1) == 1, "the second bit pulls"
+    await step(dut)
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert await read_shift(dut) == 0x40
+
 

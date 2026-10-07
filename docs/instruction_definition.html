@@ -179,7 +179,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
     <p>The next byte on the same program is three ticks: the new payload, <code>pc = 0</code>, run. The twelve config bytes and the four instruction words stay.</p>
 
     <h2>Opcodes</h2>
-    <p>Eight operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, and hold.</p>
+    <p>Ten operations. Halt is 0, set is 2, shift is 3. NRZI is 8 and NRZI-in is 9, for low-speed USB. The other high nibbles are wait, in, the two open-drain operations, and hold.</p>
 <pre>localparam [3:0] OP_HALT    = 4'h0;  // running = 0. Pins stay.
 localparam [3:0] OP_WAIT    = 4'h1;  // stall until role reads val
 localparam [3:0] OP_SET     = 4'h2;  // drive role to val, push-pull
@@ -187,9 +187,11 @@ localparam [3:0] OP_SHIFT   = 4'h3;  // drive role to the next payload bit, push
 localparam [3:0] OP_IN      = 4'h4;  // sample role into the input shift
 localparam [3:0] OP_OD      = 4'h5;  // pull or release role. val 0 pulls, val 1 releases
 localparam [3:0] OP_ODSHIFT = 4'h6;  // payload bit 0 pulls role, bit 1 releases it
-localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
+localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait
+localparam [3:0] OP_NRZI    = 4'h8;  // one byte, NRZI, complement on side, stuff after six 1s
+localparam [3:0] OP_NRZIN   = 4'h9;  // one byte in, NRZI decode, drop the stuffed bit</pre>
     <p><code>OP_SHIFT</code> and <code>OP_ODSHIFT</code> consume one bit of the output shift. The bit taken is the one <code>out_dir</code> names. <code>OP_IN</code> assembles bits in the order <code>in_dir</code> names.</p>
-    <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, and <code>OP_ODSHIFT</code>. The data pin and the side pin update together, then the hold runs. A pin the word does not write keeps its level.</p>
+    <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, <code>OP_ODSHIFT</code>, and <code>OP_NRZI</code>. The data pin and the side pin update together, then the hold runs. On <code>OP_NRZI</code> the side pin is the complement of the role pin, and <code>side_val</code> is ignored. A pin the word does not write keeps its level.</p>
 
     <h2>The 16-bit word</h2>
     <p>One word is one run step. Bits the step does not use are written as 0.</p>
@@ -200,7 +202,7 @@ localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
       <tbody>
         <tr><td>15:12</td><td><code>op</code></td><td>Which operation. The constants are above.</td></tr>
         <tr><td>11:10</td><td><code>role</code></td><td>Which data pin, a number from 0 to 3. The load map binds the number to a physical pin.</td></tr>
-        <tr><td>9</td><td><code>val</code></td><td>For <code>OP_SET</code>, the level driven. For <code>OP_WAIT</code>, the level to wait for. For <code>OP_OD</code>, 0 pulls and 1 releases.</td></tr>
+        <tr><td>9</td><td><code>val</code></td><td>For <code>OP_SET</code>, the level driven. For <code>OP_WAIT</code>, the level to wait for. For <code>OP_OD</code>, 0 pulls and 1 releases. For <code>OP_NRZI</code>, 0 sends a payload byte and 1 drives J without taking a bit. For <code>OP_IN</code>, 1 halts if the sample differs from the bit last driven by <code>OP_SHIFT</code> or <code>OP_ODSHIFT</code>.</td></tr>
         <tr><td>8</td><td><code>side</code></td><td>1 writes the side pin on this same tick. The side pin is chosen in the load map. SPI's side pin is SCK. I2C's side pin is SCL.</td></tr>
         <tr><td>7</td><td><code>side_val</code></td><td>What is written to the side pin. Push-pull: the level. Open-drain: 0 pulls, 1 releases.</td></tr>
         <tr><td>6:4</td><td><code>hold</code></td><td>Which wait to load after the pin update. The pins stay through that wait.</td></tr>
@@ -220,7 +222,8 @@ localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
         <tr><td>3</td><td><code>Thi</code></td><td>The high half, from <code>0x44</code> and <code>0x45</code>. SPI's fastest clock is <code>Tlo = Thi = 1</code>.</td></tr>
         <tr><td>4</td><td><code>1</code></td><td>One tick. I2C uses it so a released clock is visible before the wait samples it.</td></tr>
         <tr><td>5</td><td>none</td><td>No extra wait. The next instruction is the following tick.</td></tr>
-        <tr><td>6, 7</td><td></td><td>Reserved.</td></tr>
+        <tr><td>6</td><td><code>Th</code></td><td><code>floor(T/2)</code>, then <code>ceil(T/2)</code>, alternating. <code>T = 5</code> holds for 2 ticks, then 3. A pair is one bit time. The edge between them is early, then late, by half a tick.</td></tr>
+        <tr><td>7</td><td></td><td>Reserved.</td></tr>
       </tbody>
     </table>
 
@@ -241,11 +244,12 @@ op   role val side side_val hold xdec back setx
         <tr><td>Shift out</td><td><code>OP_SHIFT</code> on a push-pull pin, <code>OP_ODSHIFT</code> on an open-drain pin. Either bit order, from <code>out_dir</code>.</td></tr>
         <tr><td>Shift in</td><td><code>OP_IN</code>, eight bits, in the order <code>in_dir</code> names.</td></tr>
         <tr><td>Two pins on one tick</td><td>The data role, plus the side pin when <code>side</code> is 1. SPI's clock beside MOSI. I2C's clock beside SDA.</td></tr>
-        <tr><td>Six hold lengths</td><td><code>T</code>, <code>T/2</code>, <code>Tlo</code>, <code>Thi</code>, one tick, or none. <code>Tlo = Thi = 1</code> is a 25 MHz SPI clock.</td></tr>
+        <tr><td>Six hold lengths, plus <code>Th</code></td><td><code>T</code>, <code>T/2</code>, <code>Tlo</code>, <code>Thi</code>, one tick, or none. <code>Th</code> alternates the two halves of an odd <code>T</code>. <code>Tlo = Thi = 1</code> is a 25 MHz SPI clock.</td></tr>
         <tr><td>A loop of N bits</td><td>One counter <code>x</code>. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> with <code>back</code> 0 to 3 jumps backward while <code>x</code> stays above 0.</td></tr>
         <tr><td>Stall</td><td><code>OP_WAIT</code> until a role reads 0 or 1. UART start edge, I2C clock stretch.</td></tr>
         <tr><td>Pull and release</td><td><code>OP_OD</code> and <code>OP_ODSHIFT</code>. A 0 in the payload pulls. A 1 releases.</td></tr>
         <tr><td>Halt with the pins held</td><td><code>OP_HALT</code> clears <code>running</code> and leaves the last levels. A multi-byte I2C transfer continues from a later <code>pc</code>.</td></tr>
+        <tr><td>Halt when the sample disagrees</td><td><code>OP_IN</code> with <code>val</code> 1. The sample is kept. <code>running</code> clears and the pins stay. The bit compared is the one last driven by <code>OP_SHIFT</code> or <code>OP_ODSHIFT</code>.</td></tr>
       </tbody>
     </table>
     <p>What it does not do:</p>
@@ -255,11 +259,11 @@ op   role val side side_val hold xdec back setx
       </thead>
       <tbody>
         <tr><td>No unconditional or forward jump</td><td>A program is straight-line plus one backward loop. The host stitches segments by writing <code>pc</code>.</td></tr>
-        <tr><td>No branch on the bit just sampled</td><td>An I2C NACK or a bad UART stop bit is found by the host after halt, on <code>CMD_READ</code>.</td></tr>
+        <tr><td>No skip or forward branch on the sampled bit</td><td><code>OP_IN</code> with <code>val</code> 1 halts on a mismatch. It does not jump ahead. An I2C NACK or a bad UART stop bit is still found by the host after halt, on <code>CMD_READ</code>, unless the program sets this flag.</td></tr>
         <tr><td>Two pins per step, not three</td><td>JTAG's TCK, TMS, and TDI setup takes two ticks.</td></tr>
         <tr><td>One byte per shift register, no FIFO</td><td>One run moves at most one byte out and one byte in. The next byte is another load of the payload.</td></tr>
         <tr><td>One counter</td><td>No nested loops.</td></tr>
-        <tr><td><code>hold</code> codes 6 and 7</td><td>Reserved.</td></tr>
+        <tr><td><code>hold</code> code 7</td><td>Reserved. Code 6 is <code>Th</code>.</td></tr>
       </tbody>
     </table>
     <p>The four programs together are 31 words, so they fit in the 32-word memory if they are loaded at once. They can also replace each other: the host rewrites <code>imem</code> and the config bytes when the protocol changes.</p>
@@ -344,7 +348,7 @@ op   role val side side_val hold xdec back setx
         <tr><th>Field</th><th>Bits</th><th>Why it is in the word</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>op</code></td><td>4</td><td>Eight operations. Three bits would also cover eight operations.</td></tr>
+        <tr><td><code>op</code></td><td>4</td><td>Ten operations. Four bits cover them. Three would not.</td></tr>
         <tr><td><code>role</code></td><td>2</td><td>SPI touches MOSI, CS, and MISO. One configured data pin cannot name all three.</td></tr>
         <tr><td><code>val</code></td><td>1</td><td>The driven level, the level to wait for, or pull versus release.</td></tr>
         <tr><td><code>side</code>, <code>side_val</code></td><td>2</td><td>The clock beside the data. At one tick low and one tick high, this cannot be a later instruction.</td></tr>

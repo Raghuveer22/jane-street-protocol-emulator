@@ -9,12 +9,17 @@ Fields the line omits are 0. `side` is a flag. `setx` and `xdec` are flags.
     SET role=0 val=0 hold=T setx
     SHIFT role=0 hold=T xdec back=0
     IN role=2 side side_val=1 hold=Thi xdec back=1
+    IN role=1 abort hold=1 xdec back=1
     OD role=0 val=pull side side_val=release hold=Tlo
     ODSHIFT role=0 side side_val=pull hold=Tlo
     HOLD hold=T/2 setx
+    NRZI role=0 side hold=T xdec back=0
+    NRZI role=0 val=1 side hold=T
+    NRZIN role=0 hold=T xdec back=0
     .word 0x2001
 
-hold is T, T/2, Tlo, Thi, 1, or none. val is 0, 1, pull, or release.
+hold is T, T/2, Tlo, Thi, 1, none, or Th. val is 0, 1, pull, or release.
+`abort` is legal only on IN: halt if the sample differs from the last shifted bit.
 Blank lines and comments (`;` or `//`) are ignored. Output is padded to 32
 words with HALT, which is the size of imem.
 """
@@ -30,6 +35,8 @@ OPS = {
     "OD": 0x5,
     "ODSHIFT": 0x6,
     "HOLD": 0x7,
+    "NRZI": 0x8,
+    "NRZIN": 0x9,
 }
 
 HOLDS = {
@@ -40,6 +47,7 @@ HOLDS = {
     "THI": 3,
     "1": 4,
     "NONE": 5,
+    "TH": 6,
 }
 
 LEVELS = {
@@ -105,6 +113,10 @@ def encode(line: str):
                 xdec = 1
             elif flag == "side":
                 side = 1
+            elif flag == "abort":
+                if head != "IN":
+                    raise ValueError("abort is only legal on IN")
+                val = 1
             else:
                 raise ValueError(f"bad field: {tok}")
 

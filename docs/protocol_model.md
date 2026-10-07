@@ -170,7 +170,7 @@ Checked against C3–C5:
 | USB 1.5 Mbit/s | 33 | 50e6/33 ≈ 1.515e6 | 1.01% | f/r = 100/3 is not an integer |
 | USB 1.5 Mbit/s | 34 | ≈ 1.471e6 | 1.96% | past the usual ±1.5% window |
 | USB 12 Mbit/s | 4 or 5 | 12.5 or 10 Mbit/s | 4.2% or 17% | no T lands on 12 Mbit/s |
-| Ethernet 10 Mbit/s | 5 | 10 Mbit/s | 0 | C5 fails: T is odd, so no equal mid-bit halves |
+| Ethernet 10 Mbit/s | 5 | 10 Mbit/s | 0 | Bit cell is exact. `Th` splits it 2 + 3. Equal mid-bit halves (C5) still fail |
 
 ## The same definition in words
 
@@ -273,13 +273,13 @@ A derived count is `50e6 / rate`, in ticks of 20 ns. The two UART rows are the o
 | CAN | 1 Mbit/s | 50 | Room inside the bit to place the sample point |
 | USB low-speed | 1.5 Mbit/s | 33.3 | 33 ticks is about 1.515 Mbit/s, near 1 percent fast |
 | USB full-speed | 12 Mbit/s | 4.17 | No integer tick count lands on 12 Mbit/s |
-| Ethernet | 10 Mbit/s | 5 | The bit fits. A half-bit is 2.5 ticks, which is not an integer |
+| Ethernet | 10 Mbit/s | 5 | The bit fits. `Th` holds 2 ticks, then 3. The mid-bit edge is at 40 ns, then 60 ns |
 
 The waits in UART and I2C are the easy ones. `wait_left` in `src/pin_engine.v` is that counter for every hold a program names.
 
 USB low-speed is the first place the tick size shows. The usual rate tolerance on low-speed is about 1.5 percent, and 33 ticks sits inside that. Full-speed does not have an integer `period` on this clock, so it falls outside the model even before the electrical interface is considered.
 
-10 Mbit Ethernet lands on exactly 5 ticks per bit. Manchester coding wants a transition in the middle of the bit, and half of 5 is not a whole number of ticks. The two halves would be 2 ticks and 3 ticks, 40 ns and 60 ns. That is a real deformation of the symbol. Speaking MII to an external PHY instead of Manchester on the cable moves the problem back to nibbles, at 2.5 MHz, which is 20 ticks and an integer.
+10 Mbit Ethernet lands on exactly 5 ticks per bit. Manchester coding wants a transition in the middle of the bit, and half of 5 is not a whole number of ticks. `hold=Th` is that split on purpose: 2 ticks then 3, 40 ns then 60 ns. Two halves are one bit time. The halves are not equal, so a receiver that demands a 50 ns mid-bit edge does not get one. Speaking MII to an external PHY instead of Manchester on the cable moves the problem back to nibbles, at 2.5 MHz, which is 20 ticks and an integer.
 
 ## Pins
 
@@ -292,7 +292,7 @@ USB low-speed is the first place the tick size shows. The usual rate tolerance o
 | Move | Opcode |
 | --- | --- |
 | Drive a pin to 0 or 1 | `OP_SET` |
-| Hold for N ticks | `wait_left`, from `T`, `T/2`, `Tlo`, `Thi`, one tick, or none |
+| Hold for N ticks | `wait_left`, from `T`, `T/2`, `Th`, `Tlo`, `Thi`, one tick, or none |
 | Shift a bit out | `OP_SHIFT` push-pull, `OP_ODSHIFT` open-drain. Either bit order |
 | Stall until a pin matches | `OP_WAIT` |
 | Shift a pin in | `OP_IN` |
