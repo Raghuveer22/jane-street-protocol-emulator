@@ -1,0 +1,51 @@
+# Publish docs/instruction_definition.html to GitHub Pages for sharing.
+# Site: https://raghuveer22.github.io/jane-street-protocol-emulator/instruction_definition.html
+#
+# Note: the GDS "viewer" job also deploys to Pages. Whichever run finishes
+# last owns the site. Re-run this workflow after a GDS build if the doc URL 404s.
+
+name: pages-docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/instruction_definition.html"
+      - "docs/index.html"
+      - ".github/workflows/pages-docs.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          cp docs/instruction_definition.html _site/
+          cp docs/index.html _site/
+          touch _site/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

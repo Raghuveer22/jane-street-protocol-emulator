@@ -44,6 +44,10 @@ cd test && make -B
 
 The problem is `docs/info.md`. The instruction word and the host command map are in `docs/instruction_definition.html`. How the engine applies them is `docs/pin_engine.md`. One UART byte from host write to the TX pin is `docs/uart_flow.md`.
 
+Shareable copy of the instruction page (GitHub Pages):
+
+https://raghuveer22.github.io/jane-street-protocol-emulator/instruction_definition.html
+
 Questions: asic-competition@janestreet.com
 
 ## License
