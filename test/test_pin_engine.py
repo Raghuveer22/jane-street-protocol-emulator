@@ -56,6 +56,10 @@ QSPI_OUT = [0x3140, 0x31C0, 0x0000]
 # setx, then four shifts of one group. xreload is the number of groups.
 QSPI_GROUPS = [0x7041, 0x3048, 0x0000]
 QSPI_IN = [0x4040, 0x4040, 0x0000]
+# Low-speed USB transmit. XOR + JMP. yreload is byte 0x4D bits [4:1].
+USB_LS_TX = [0x2180, 0xA108, 0x90D0, 0xA301, 0x91D6, 0x2100, 0x2100, 0x2180, 0x0000]
+DP = 0x48       # uo[0], push-pull, idle 0 (J is D+ low)
+DM = 0x69       # uo[1], push-pull, idle 1 (J is D− high)
 
 
 def uo(dut):
@@ -751,4 +755,288 @@ async def test_ping_pong_bank_on_wrap(dut):
     await step(dut)
     assert busy_of(dut) == 0
     assert tx_of(dut) == 0
+
+
+def uio_oe(dut):
+    return int(dut.uio_oe.value) & 0xFF
+
+
+def uio_out(dut):
+    return int(dut.uio_out.value) & 0xFF
+
+
+@cocotb.test()
+async def test_odshift_loses_arbitration(dut):
+    """A recessive bit stops the run when the wire is dominant."""
+    await boot(dut)
+    await load_cfg(dut, roles=(SDA, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, [0x6250, 0x0000])
+    await pulse(dut, CMD_PAYLOAD, 0x01)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x00
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert uio_oe(dut) & 1 == 0
+
+    await load_words(dut, [0x6250, 0x0000])
+    await pulse(dut, CMD_PAYLOAD, 0x00)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x00
+    await step(dut)
+    assert busy_of(dut) == 1
+    assert uio_oe(dut) & 1 == 1
+    await step(dut)
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_odshift_recessive_holds_when_the_wire_is_free(dut):
+    await boot(dut)
+    await load_cfg(dut, roles=(SDA, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, [0x6250, 0x0000])
+    await pulse(dut, CMD_PAYLOAD, 0x01)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x01
+    await step(dut)
+    assert busy_of(dut) == 1
+    assert uio_oe(dut) & 1 == 0
+    await step(dut)
+    assert busy_of(dut) == 0
+
+
+@cocotb.test()
+async def test_match_stops_on_nack(dut):
+    await boot(dut)
+    await load_cfg(dut, roles=(SDA, 0, 0, 0), dirs=LSB8)
+    await load_words(dut, [0x8050, 0x0000])
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x01
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert uio_oe(dut) & 1 == 0
+    assert await read_shift(dut) == 0x80
+
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x00
+    await step(dut)
+    assert busy_of(dut) == 1
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert await read_shift(dut) == 0x00
+
+
+@cocotb.test()
+async def test_width8_byte_on_uio(dut):
+    """width 3 drives and samples all eight uio pins in one instruction."""
+    await boot(dut)
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0x00)
+    await load_bytes(dut, 0x4C, [0x70])  # width 8, base uio[0]
+    await load_words(dut, [0x3050, 0x0000])
+    await pulse(dut, CMD_PAYLOAD, 0xA5)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    assert uio_out(dut) == 0xA5
+    assert uio_oe(dut) == 0xFF
+    await step(dut)
+    assert busy_of(dut) == 0
+
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0x80)
+    await load_bytes(dut, 0x4C, [0x70])
+    await load_words(dut, [0x3050, 0x0000])
+    await pulse(dut, CMD_PAYLOAD, 0x01)
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    await step(dut)
+    assert uio_out(dut) == 0x80
+
+    dut.rst_n.value = 0
+    await step(dut)
+    dut.rst_n.value = 1
+    await step(dut)
+    await load_cfg(dut, roles=(0, 0, 0, 0), dirs=0x00)
+    await load_bytes(dut, 0x4C, [0x70])
+    await load_words(dut, [0x4050, 0x0000])
+    await pulse(dut, CMD_PC, 0)
+    await pulse(dut, CMD_RUN, 0)
+    dut.uio_in.value = 0x3C
+    await step(dut)
+    await step(dut)
+    assert busy_of(dut) == 0
+    assert await read_shift(dut) == 0x3C
+
+
+def nrzi_dp_wave(bytes_in, yreload, period):
+    """D+ samples for usb_ls_tx.asm, including one-tick JMP holds.
+
+    Starts from J (D+ = 0). A 0 toggles. A 1 holds. After `yreload` ones the
+    insert XOR toggles once. Each JMP is hold=none, so one extra tick at the
+    current level. Ends with SE0, SE0, J.
+    """
+    dp = 0
+    ones = yreload
+    wave = [0] * period
+    for byte in bytes_in:
+        for i in range(8):
+            bit = (byte >> i) & 1
+            if bit == 0:
+                dp ^= 1
+                ones = yreload
+            else:
+                ones -= 1
+            wave.extend([dp] * period)
+            if ones == 0:
+                wave.append(dp)
+                dp ^= 1
+                ones = yreload
+                wave.extend([dp] * period)
+                wave.append(dp)
+            else:
+                wave.append(dp)
+                wave.append(dp)
+    wave.extend([0] * period)
+    wave.extend([0] * period)
+    wave.extend([0] * period)
+    return wave
+
+
+def dp_of(dut):
+    return uo(dut) & 1
+
+
+def dm_of(dut):
+    return (uo(dut) >> 1) & 1
+
+
+async def capture_usb(dut, ncycles):
+    await pulse(dut, CMD_RUN, 0)
+    assert busy_of(dut) == 1
+    await step(dut)
+    samples = [(dp_of(dut), dm_of(dut))]
+    for _ in range(ncycles - 1):
+        await step(dut)
+        samples.append((dp_of(dut), dm_of(dut)))
+    return samples
+
+
+@cocotb.test()
+async def test_usb_ls_tx_complement_and_eop(dut):
+    """D− tracks ~D+ through the packet. SE0 is both low. Then J."""
+    period = 2
+    packet = [0x80, 0x00]
+    await boot(dut)
+    await load_cfg(dut, t=period, roles=(DP, 0, 0, 0), side=DM, dirs=LSB_PULL)
+    await load_bytes(dut, 0x4D, [6 << 1])
+    await load_words(dut, USB_LS_TX)
+    await pulse(dut, CMD_PAYLOAD, packet[0])
+    await pulse(dut, CMD_PUSH, packet[1])
+    await pulse(dut, CMD_PC, 0)
+
+    expected = nrzi_dp_wave(packet, 6, period)
+    samples = await capture_usb(dut, len(expected))
+    while busy_of(dut):
+        await step(dut)
+
+    dp_wave = [dp for dp, _ in samples]
+    assert dp_wave == expected, f"D+ {dp_wave} != {expected}"
+    # Trailer: SE0, SE0, J. Each is `period` ticks at the end of the wave.
+    se0_start = len(expected) - 3 * period
+    for i, (dp, dm) in enumerate(samples):
+        if se0_start <= i < se0_start + 2 * period:
+            assert dp == 0 and dm == 0, f"SE0 at {i}: dp={dp} dm={dm}"
+        else:
+            assert dm == (dp ^ 1), f"complement at {i}: dp={dp} dm={dm}"
+
+
+@cocotb.test()
+async def test_usb_ls_tx_stuff_yreload(dut):
+    """yreload=3 inserts sooner than yreload=6. The RTL has no constant 6."""
+    period = 1
+    packet = [0xFF]
+    await boot(dut)
+    await load_cfg(dut, t=period, roles=(DP, 0, 0, 0), side=DM, dirs=LSB_PULL)
+    await load_words(dut, USB_LS_TX)
+
+    await load_bytes(dut, 0x4D, [6 << 1])
+    await pulse(dut, CMD_PAYLOAD, packet[0])
+    await pulse(dut, CMD_PC, 0)
+    exp6 = nrzi_dp_wave(packet, 6, period)
+    got6 = [dp for dp, _ in await capture_usb(dut, len(exp6))]
+    while busy_of(dut):
+        await step(dut)
+    assert got6 == exp6
+
+    await load_bytes(dut, 0x4D, [3 << 1])
+    await pulse(dut, CMD_PAYLOAD, packet[0])
+    await pulse(dut, CMD_PC, 0)
+    exp3 = nrzi_dp_wave(packet, 3, period)
+    got3 = [dp for dp, _ in await capture_usb(dut, len(exp3))]
+    while busy_of(dut):
+        await step(dut)
+    assert got3 == exp3
+    assert len(exp3) > len(exp6)
+    assert exp3 != exp6
+
+
+async def capture_until_halt(dut):
+    """Pin samples from the first instruction through the tick before HALT."""
+    await pulse(dut, CMD_RUN, 0)
+    assert busy_of(dut) == 1
+    await step(dut)
+    samples = []
+    while busy_of(dut):
+        samples.append((dp_of(dut), dm_of(dut)))
+        await step(dut)
+    return samples
+
+
+@cocotb.test()
+async def test_usb_bit_cell_is_T_across_stuff(dut):
+    """Every USB symbol lasts T ticks, including a bit inserted for stuffing.
+
+    The model in usb_bit_time.py is the claim. The pin trace is the
+    measurement. A JMP does not get its own cell: ticks between pin
+    writes belong to the symbol already on the wire.
+    """
+    from usb_bit_time import cell_report, machine_cells, uniform_cells, wave
+
+    period = 4
+    # 0x00 toggles every data bit. 0xFF with yreload 6 inserts one stuff.
+    # yreload 1 inserts a stuff after every one.
+    cases = (([0x00], 6), ([0xFF], 6), ([0xFF], 1))
+    await boot(dut)
+    await load_cfg(dut, t=period, roles=(DP, 0, 0, 0), side=DM, dirs=LSB_PULL)
+    await load_words(dut, USB_LS_TX)
+
+    misses = []
+    for packet, yreload in cases:
+        await load_bytes(dut, 0x4D, [yreload << 1])
+        await pulse(dut, CMD_PAYLOAD, packet[0])
+        await pulse(dut, CMD_PC, 0)
+        samples = await capture_until_halt(dut)
+        got = [dp for dp, _ in samples]
+        claimed = wave(uniform_cells(packet, yreload, period))
+        sched = machine_cells(packet, yreload, period)
+        actual = wave(sched)
+        assert got == actual, (
+            f"packet {packet} yreload {yreload}: pins are not the "
+            f"program schedule\n{cell_report(sched, period)}"
+        )
+        for i, (dp, dm) in enumerate(samples):
+            if dp == 0 and dm == 0:
+                continue
+            assert dm == (dp ^ 1), f"complement at {i}: dp={dp} dm={dm}"
+        if got != claimed:
+            misses.append(
+                f"packet {packet} yreload {yreload}\n{cell_report(sched, period)}"
+            )
+    assert not misses, (
+        f"a bit cell is not {period} ticks when the program branches\n\n"
+        + "\n\n".join(misses)
+    )
 

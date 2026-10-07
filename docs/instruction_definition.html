@@ -114,7 +114,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
         <tr><td><code>0x4A</code></td><td>The side pin, same binding byte.</td></tr>
         <tr><td><code>0x4B</code></td><td>Shift directions and the loop reload.</td></tr>
         <tr><td><code>0x4C</code></td><td>Shift width and base pin. Left at reset, the width is one bit and the role pin is used.</td></tr>
-        <tr><td><code>0x4D</code></td><td>Bit 0 arms a bank switch. Taken on <code>OP_HALT</code>, or when <code>pc</code> steps off word 31 without a backward branch. The banks flip, <code>pc</code> is 0, and <code>running</code> stays 1.</td></tr>
+        <tr><td><code>0x4D</code></td><td>Bit 0 arms a bank switch. Bits <code>[4:1]</code> are <code>yreload</code>. The arm is taken on <code>OP_HALT</code>, or when <code>pc</code> steps off word 31 without a backward branch. The banks flip, <code>pc</code> is 0, and <code>running</code> stays 1.</td></tr>
       </tbody>
     </table>
     <p>A binding byte is <code>{mode[1:0], idle, pin[4:0]}</code>.</p>
@@ -128,7 +128,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
         <tr><td>4:0</td><td><code>pin</code></td><td>0–7 are <code>ui</code>, 8–15 are <code>uo</code>, 16–23 are <code>uio</code>.</td></tr>
       </tbody>
     </table>
-    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, autopull, autopush, xreload[3:0]}</code>. Byte <code>0x4C</code> is <code>{0, width[1:0], base[4:0]}</code>. Width 0 is one bit, 1 is two bits, 2 is four. The low pin of the group is the low bit. A group stays inside one port.</p>
+    <p>Byte <code>0x4B</code> is <code>{out_dir, in_dir, autopull, autopush, xreload[3:0]}</code>. Byte <code>0x4C</code> is <code>{0, width[1:0], base[4:0]}</code>. Width 0 is one bit, 1 is two bits, 2 is four, 3 is eight. The low pin of the group is the low bit. Width 8 places the whole byte on eight consecutive pins. A group stays inside one port. Eight bits fit on <code>uio</code> or <code>ui</code>. Pin 15 is <code>running</code>, so they do not fit on <code>uo</code>.</p>
     <table>
       <thead>
         <tr><th>Bits</th><th>Field</th><th>What it is</th></tr>
@@ -180,7 +180,7 @@ localparam [2:0] CMD_POP     = 3'd7;  // dequeue one RX FIFO byte onto uio</pre>
     <p>The next byte on the same program is three ticks: the new payload, <code>pc = 0</code>, run. The twelve config bytes and the four instruction words stay.</p>
 
     <h2>Opcodes</h2>
-    <p>Eight operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, and hold.</p>
+    <p>Eleven operations. Halt is 0, set is 2, shift is 3. The other high nibbles are wait, in, the two open-drain operations, hold, match, jmp, and xor.</p>
 <pre>localparam [3:0] OP_HALT    = 4'h0;  // running = 0. Pins stay.
 localparam [3:0] OP_WAIT    = 4'h1;  // stall until role reads val
 localparam [3:0] OP_SET     = 4'h2;  // drive role to val, push-pull
@@ -188,9 +188,14 @@ localparam [3:0] OP_SHIFT   = 4'h3;  // drive role to the next payload bit, push
 localparam [3:0] OP_IN      = 4'h4;  // sample role into the input shift
 localparam [3:0] OP_OD      = 4'h5;  // pull or release role. val 0 pulls, val 1 releases
 localparam [3:0] OP_ODSHIFT = 4'h6;  // payload bit 0 pulls role, bit 1 releases it
-localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
+localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait
+localparam [3:0] OP_MATCH   = 4'h8;  // stop unless the role reads val
+localparam [3:0] OP_JMP     = 4'h9;  // branch on a condition. No pin write
+localparam [3:0] OP_XOR     = 4'hA;  // width-1 differential bit. side is the complement</pre>
     <p><code>OP_SHIFT</code> and <code>OP_ODSHIFT</code> consume one bit of the output shift. The bit taken is the one <code>out_dir</code> names. <code>OP_IN</code> assembles bits in the order <code>in_dir</code> names.</p>
-    <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, and <code>OP_ODSHIFT</code>. The data pin and the side pin update together, then the hold runs. A pin the word does not write keeps its level.</p>
+    <p><code>OP_JMP</code> takes bits <code>[9:7]</code> as the condition: 0 always, 1 <code>Y != 0</code>, 2 <code>Y == 0</code>, 3 more payload. True and <code>back != 0</code> goes to <code>pc - back</code>. True and <code>back == 0</code> skips the next word. False advances one.</p>
+    <p><code>OP_XOR</code> is width 1. <code>val</code> 0 drives <code>level XOR ~bit</code> and consumes the bit. <code>val</code> 1 toggles without taking a bit. <code>side</code> drives the complement. On this opcode <code>xdec</code> and <code>setx</code> touch <code>Y</code>, not <code>X</code>. <code>CMD_RUN</code> loads <code>Y</code> from <code>yreload</code> in <code>0x4D[4:1]</code>.</p>
+    <p><code>side</code> is allowed on <code>OP_SET</code>, <code>OP_SHIFT</code>, <code>OP_IN</code>, <code>OP_OD</code>, <code>OP_ODSHIFT</code>, and <code>OP_XOR</code>. The data pin and the side pin update together, then the hold runs. A pin the word does not write keeps its level.</p>
 
     <h2>The 16-bit word</h2>
     <p>One word is one run step. Bits the step does not use are written as 0.</p>
@@ -201,13 +206,13 @@ localparam [3:0] OP_HOLD    = 4'h7;  // change no pin, only load the wait</pre>
       <tbody>
         <tr><td>15:12</td><td><code>op</code></td><td>Which operation. The constants are above.</td></tr>
         <tr><td>11:10</td><td><code>role</code></td><td>Which data pin, a number from 0 to 3. The load map binds the number to a physical pin.</td></tr>
-        <tr><td>9</td><td><code>val</code></td><td>For <code>OP_SET</code>, the level driven. For <code>OP_WAIT</code>, the level to wait for. For <code>OP_OD</code>, 0 pulls and 1 releases.</td></tr>
-        <tr><td>8</td><td><code>side</code></td><td>1 writes the side pin on this same tick. The side pin is chosen in the load map. SPI's side pin is SCK. I2C's side pin is SCL.</td></tr>
-        <tr><td>7</td><td><code>side_val</code></td><td>What is written to the side pin. Push-pull: the level. Open-drain: 0 pulls, 1 releases.</td></tr>
+        <tr><td>9</td><td><code>val</code></td><td>For <code>OP_SET</code>, the level driven. For <code>OP_WAIT</code>, the level to wait for. For <code>OP_OD</code>, 0 pulls and 1 releases. For <code>OP_ODSHIFT</code>, 1 stops the run when an open-drain bus does not read back the bit just driven. For <code>OP_MATCH</code>, the level the role must read. For <code>OP_XOR</code>, 0 consumes a payload bit and 1 toggles only. For <code>OP_JMP</code>, the high bit of the condition.</td></tr>
+        <tr><td>8</td><td><code>side</code></td><td>1 writes the side pin on this same tick. The side pin is chosen in the load map. SPI's side pin is SCK. I2C's side pin is SCL. On <code>OP_JMP</code>, the middle condition bit.</td></tr>
+        <tr><td>7</td><td><code>side_val</code></td><td>What is written to the side pin. Push-pull: the level. Open-drain: 0 pulls, 1 releases. On <code>OP_XOR</code> with <code>side</code>, unused: the side pin is the complement. On <code>OP_JMP</code>, the low condition bit.</td></tr>
         <tr><td>6:4</td><td><code>hold</code></td><td>Which wait to load after the pin update. The pins stay through that wait.</td></tr>
-        <tr><td>3</td><td><code>xdec</code></td><td>1 subtracts 1 from <code>x</code>. If <code>x</code> is still greater than 0, the next instruction is this address minus <code>back</code>. If <code>x</code> is 0, execution falls through.</td></tr>
-        <tr><td>2:1</td><td><code>back</code></td><td>How many instructions the loop jumps back. 0 means this same instruction. 1 means the previous one.</td></tr>
-        <tr><td>0</td><td><code>setx</code></td><td>1 loads <code>x</code> with <code>xreload</code>.</td></tr>
+        <tr><td>3</td><td><code>xdec</code></td><td>1 subtracts 1 from <code>x</code>. If <code>x</code> is still greater than 0, the next instruction is this address minus <code>back</code>. If <code>x</code> is 0, execution falls through. On <code>OP_XOR</code>, counts ones into <code>Y</code> instead and does not touch <code>x</code>.</td></tr>
+        <tr><td>2:1</td><td><code>back</code></td><td>How many instructions the loop jumps back. 0 means this same instruction. 1 means the previous one. On <code>OP_JMP</code>, 0 means skip the next word when the condition is true.</td></tr>
+        <tr><td>0</td><td><code>setx</code></td><td>1 loads <code>x</code> with <code>xreload</code>. On <code>OP_XOR</code>, loads <code>Y</code> with <code>yreload</code>.</td></tr>
       </tbody>
     </table>
     <table>
@@ -239,11 +244,12 @@ op   role val side side_val hold xdec back setx
         <tr><th>Move</th><th>How</th></tr>
       </thead>
       <tbody>
-        <tr><td>Shift out</td><td><code>OP_SHIFT</code> on a push-pull pin, <code>OP_ODSHIFT</code> on an open-drain pin. Either bit order, from <code>out_dir</code>.</td></tr>
+        <tr><td>Shift out</td><td><code>OP_SHIFT</code> on a push-pull pin, <code>OP_ODSHIFT</code> on an open-drain pin, <code>OP_XOR</code> for a differential toggle. Either bit order, from <code>out_dir</code>.</td></tr>
         <tr><td>Shift in</td><td><code>OP_IN</code>, eight bits, in the order <code>in_dir</code> names.</td></tr>
-        <tr><td>Two pins on one tick</td><td>The data role, plus the side pin when <code>side</code> is 1. SPI's clock beside MOSI. I2C's clock beside SDA.</td></tr>
+        <tr><td>Two pins on one tick</td><td>The data role, plus the side pin when <code>side</code> is 1. SPI's clock beside MOSI. I2C's clock beside SDA. <code>OP_XOR</code> drives the complement on the side pin.</td></tr>
         <tr><td>Six hold lengths</td><td><code>T</code>, <code>T/2</code>, <code>Tlo</code>, <code>Thi</code>, one tick, or none. <code>Tlo = Thi = 1</code> is a 25 MHz SPI clock.</td></tr>
-        <tr><td>A loop of N bits</td><td>One counter <code>x</code>. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> with <code>back</code> 0 to 3 jumps backward while <code>x</code> stays above 0.</td></tr>
+        <tr><td>A loop of N bits</td><td>Counter <code>x</code>. <code>setx</code> loads <code>xreload</code>. <code>xdec</code> with <code>back</code> 0 to 3 jumps backward while <code>x</code> stays above 0.</td></tr>
+        <tr><td>A run-length counter</td><td>Counter <code>Y</code> and <code>yreload</code>. <code>OP_XOR</code> with <code>xdec</code> counts ones. <code>OP_JMP</code> branches on <code>Y</code> or on more payload.</td></tr>
         <tr><td>Stall</td><td><code>OP_WAIT</code> until a role reads 0 or 1. UART start edge, I2C clock stretch.</td></tr>
         <tr><td>Pull and release</td><td><code>OP_OD</code> and <code>OP_ODSHIFT</code>. A 0 in the payload pulls. A 1 releases.</td></tr>
         <tr><td>Halt with the pins held</td><td><code>OP_HALT</code> clears <code>running</code> and leaves the last levels. A multi-byte I2C transfer continues from a later <code>pc</code>.</td></tr>
@@ -255,15 +261,13 @@ op   role val side side_val hold xdec back setx
         <tr><th>Missing</th><th>Consequence</th></tr>
       </thead>
       <tbody>
-        <tr><td>No unconditional or forward jump</td><td>A program is straight-line plus one backward loop. The host stitches segments by writing <code>pc</code>.</td></tr>
-        <tr><td>No branch on the bit just sampled</td><td>An I2C NACK or a bad UART stop bit is found by the host after halt, on <code>CMD_READ</code>.</td></tr>
+        <tr><td>No long forward jump</td><td><code>OP_JMP</code> skips one word or jumps backward at most three. The host still stitches longer segments by writing <code>pc</code>.</td></tr>
+        <tr><td>No branch on the bit just sampled</td><td><code>OP_MATCH</code>, and <code>OP_ODSHIFT</code> with bit 9 set, halt when the wire disagrees. They do not select an address. A program that does not use them still leaves an I2C NACK for the host to read after halt.</td></tr>
         <tr><td>Two pins per step, not three</td><td>JTAG's TCK, TMS, and TDI setup takes two ticks.</td></tr>
-        <tr><td>One byte per shift register, no FIFO</td><td>One run moves at most one byte out and one byte in. The next byte is another load of the payload.</td></tr>
-        <tr><td>One counter</td><td>No nested loops.</td></tr>
         <tr><td><code>hold</code> codes 6 and 7</td><td>Reserved.</td></tr>
       </tbody>
     </table>
-    <p>The four programs together are 31 words, so they fit in the 32-word memory if they are loaded at once. They can also replace each other: the host rewrites <code>imem</code> and the config bytes when the protocol changes.</p>
+    <p>The required programs together fit in the 32-word bank. They can also replace each other: the host rewrites <code>imem</code> and the config bytes when the protocol changes. <code>prog/usb_ls_tx.asm</code> is a later program in the same word format: <code>yreload</code> is the stuff length, not a constant in the Verilog.</p>
 
     <h2>UART sender</h2>
     <p>Role 0 is TX, push-pull. No side pin. Shift bit 0 first. <code>T</code> is the bit time. Four words. The loop is one <code>OP_SHIFT</code> that jumps to itself.</p>

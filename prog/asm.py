@@ -10,13 +10,19 @@ Fields the line omits are 0. `side` is a flag. `setx` and `xdec` are flags.
     SHIFT role=0 hold=T xdec back=0
     IN role=2 side side_val=1 hold=Thi xdec back=1
     OD role=0 val=pull side side_val=release hold=Tlo
-    ODSHIFT role=0 side side_val=pull hold=Tlo
+    ODSHIFT role=0 side side_val=pull hold=Tlo match
     HOLD hold=T/2 setx
+    MATCH role=0 val=0 hold=none
+    JMP cond=y!=0 back=0 hold=none
+    JMP cond=more back=3 hold=none
+    XOR role=0 side hold=T xdec
+    XOR role=0 val=1 side hold=T setx
     .word 0x2001
 
 hold is T, T/2, Tlo, Thi, 1, or none. val is 0, 1, pull, or release.
-Blank lines and comments (`;` or `//`) are ignored. Output is padded to 32
-words with HALT, which is the size of imem.
+JMP cond is always, y!=0, y==0, or more. Blank lines and comments (`;` or
+`//`) are ignored. Output is padded to 32 words with HALT, which is the
+size of imem.
 """
 
 import sys
@@ -30,6 +36,9 @@ OPS = {
     "OD": 0x5,
     "ODSHIFT": 0x6,
     "HOLD": 0x7,
+    "MATCH": 0x8,
+    "JMP": 0x9,
+    "XOR": 0xA,
 }
 
 HOLDS = {
@@ -47,6 +56,15 @@ LEVELS = {
     "1": 1,
     "PULL": 0,
     "RELEASE": 1,
+}
+
+CONDS = {
+    "ALWAYS": 0,
+    "Y!=0": 1,
+    "YNE0": 1,
+    "Y==0": 2,
+    "YEQ0": 2,
+    "MORE": 3,
 }
 
 
@@ -77,7 +95,8 @@ def encode(line: str):
     if head not in OPS:
         raise ValueError(f"bad instruction: {line}")
 
-    role = val = side = side_val = hold = xdec = back = setx = 0
+    role = val = side = side_val = hold = xdec = back = setx = match = 0
+    cond = None
     for tok in parts[1:]:
         if "=" in tok:
             key, raw = tok.split("=", 1)
@@ -95,6 +114,10 @@ def encode(line: str):
                 back = int(raw, 0)
             elif key == "side_val":
                 side_val = LEVELS[upper] if upper in LEVELS else int(raw, 0)
+            elif key == "cond":
+                if upper not in CONDS:
+                    raise ValueError(f"bad cond: {raw}")
+                cond = CONDS[upper]
             else:
                 raise ValueError(f"bad field: {tok}")
         else:
@@ -105,11 +128,23 @@ def encode(line: str):
                 xdec = 1
             elif flag == "side":
                 side = 1
+            elif flag == "match":
+                match = 1
             else:
                 raise ValueError(f"bad field: {tok}")
 
     if not 0 <= role <= 3 or not 0 <= back <= 3:
         raise ValueError(f"field out of range: {line}")
+    # On ODSHIFT and SHIFT, bit 9 is the arbitration check, not a level.
+    if match:
+        val = 1
+    # JMP packs the condition into bits [9:7].
+    if head == "JMP":
+        if cond is None:
+            cond = 0
+        val = (cond >> 2) & 1
+        side = (cond >> 1) & 1
+        side_val = cond & 1
     return pack(OPS[head], role, val, side, side_val, hold, xdec, back, setx)
 
 
