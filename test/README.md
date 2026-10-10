@@ -4,7 +4,7 @@
 
 ## Layout
 
-- `PROJECT_SOURCES` is `pin_engine.v project.v`
+- `PROJECT_SOURCES` is `pin_io.v pin_engine.v project.v`
 - `tb.v` instantiates `tt_um_posamokshith_proto`
 - `COCOTB_TEST_MODULES` is `test_pin_engine`
 

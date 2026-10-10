@@ -14,6 +14,7 @@ project:
   top_module:  "tt_um_posamokshith_proto"
 
   source_files:
+    - "pin_io.v"
     - "pin_engine.v"
     - "project.v"
 
